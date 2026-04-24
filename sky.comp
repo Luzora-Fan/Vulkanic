@@ -1,0 +1,266 @@
+#ifndef SKY_COMP_INCLUDED
+#define SKY_COMP_INCLUDED
+
+const float PI = 3.14159265358979323846;
+
+struct RNG
+{
+    uint state;
+};
+
+float rng_next(inout RNG rng)
+{
+    rng.state = 1664525u * rng.state + 1013904223u;
+    return float(rng.state & 0x00FFFFFFu) / 16777216.0;
+}
+
+vec2 rng_next2(inout RNG rng)
+{
+    return vec2(rng_next(rng), rng_next(rng));
+}
+
+void sky_build_basis(vec3 n, out vec3 t, out vec3 b)
+{
+    vec3 helper = abs(n.y) < 0.999 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+    t = normalize(cross(helper, n));
+    b = cross(n, t);
+}
+
+vec3 sample_cone(vec3 dir, float coneAngle, inout RNG rng)
+{
+    vec2 xi = rng_next2(rng);
+    float cosTheta = mix(cos(coneAngle), 1.0, xi.x);
+    float sinTheta = sqrt(max(0.0, 1.0 - cosTheta * cosTheta));
+    float phi = 2.0 * PI * xi.y;
+
+    vec3 tangent;
+    vec3 bitangent;
+    sky_build_basis(normalize(dir), tangent, bitangent);
+    return normalize(tangent * cos(phi) * sinTheta +
+    bitangent * sin(phi) * sinTheta +
+    normalize(dir) * cosTheta);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SPECTRAL CONSTANTS
+// ═══════════════════════════════════════════════════════════════════════════
+
+vec3 SkyBetaR()
+{
+    return sceneData.skyBetaRayleighBetaM.xyz;
+}
+
+float SkyBetaM()
+{
+    return sceneData.skyBetaRayleighBetaM.w;
+}
+
+float SkyMieG()
+{
+    return sceneData.skyMieEarthAtmosScaleHr.x;
+}
+
+float SkyEarthRadius()
+{
+    return sceneData.skyMieEarthAtmosScaleHr.y;
+}
+
+float SkyAtmosphereRadius()
+{
+    return sceneData.skyMieEarthAtmosScaleHr.z;
+}
+
+float SkyScaleHeightRayleigh()
+{
+    return sceneData.skyMieEarthAtmosScaleHr.w;
+}
+
+float SkyScaleHeightMie()
+{
+    return sceneData.skyScaleHmSunRadiusAa.x;
+}
+
+float SkySunRadius()
+{
+    return sceneData.skyScaleHmSunRadiusAa.y;
+}
+
+float SkySunAa()
+{
+    return sceneData.skyScaleHmSunRadiusAa.z;
+}
+
+vec3 SkySunRadiance()
+{
+    return sceneData.skySunRadiance.xyz;
+}
+
+int SkySecondarySamples()
+{
+    return int(sceneData.skySampleCounts.x);
+}
+
+int SkyViewSteps()
+{
+    return int(sceneData.skySampleCounts.y);
+}
+
+int SkySamples()
+{
+    return int(sceneData.skySampleCounts.z);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ATMOSPHERE INTERSECTION
+// ═══════════════════════════════════════════════════════════════════════════
+
+vec2 ray_sphere(vec3 origin, vec3 dir, float radius)
+{
+    float b = dot(origin, dir);
+    float c = dot(origin, origin) - radius * radius;
+    float d = b * b - c;
+    if (d < 0.0) return vec2(-1.0);
+    float sq = sqrt(d);
+    return vec2(-b - sq, -b + sq);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// OPTICAL DEPTH INTEGRALS
+// ═══════════════════════════════════════════════════════════════════════════
+
+vec2 optical_depth_ray(vec3 origin, vec3 dir, int num_steps)
+{
+    vec2 t_atmos = ray_sphere(origin, dir, SkyAtmosphereRadius());
+    float t_max = max(t_atmos.y, 0.0);
+
+    float step_size = t_max / float(num_steps);
+    vec3 pos = origin;
+    float od_R = 0.0;
+    float od_M = 0.0;
+
+    for (int i = 0; i < num_steps; i++)
+    {
+        pos += dir * step_size;
+        float altitude = max(length(pos) - SkyEarthRadius(), 0.0);
+        od_R += exp(-altitude / SkyScaleHeightRayleigh()) * step_size;
+        od_M += exp(-altitude / SkyScaleHeightMie()) * step_size;
+    }
+    return vec2(od_R, od_M);
+}
+
+vec3 transmittance(vec3 origin, vec3 dir, int steps)
+{
+    vec2 od = optical_depth_ray(origin, dir, steps);
+    return exp(-(SkyBetaR() * od.x + SkyBetaM() * od.y));
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PHASE FUNCTIONS
+// ═══════════════════════════════════════════════════════════════════════════
+
+float phase_rayleigh(float cos_theta)
+{
+    return 3.0 / (16.0 * PI) * (1.0 + cos_theta * cos_theta);
+}
+
+float phase_mie(float cos_theta)
+{
+    float g = SkyMieG();
+    float g2 = g * g;
+    float denom = pow(max(1e-4, 1.0 + g2 - 2.0 * g * cos_theta), 1.5);
+    return (1.0 - g2) / (4.0 * PI * denom);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SKY_TINT — spectral sky color for view direction V toward sun L
+// ═══════════════════════════════════════════════════════════════════════════
+
+float sun_disk(vec3 V, vec3 L)
+{
+    float mu = dot(normalize(V), normalize(L));
+    float inner = cos(SkySunRadius() - SkySunAa());
+    float outer = cos(SkySunRadius() + SkySunAa());
+    return smoothstep(outer, inner, mu);
+}
+
+vec3 sky_tint(vec3 V, vec3 L)
+{
+    vec3 origin = vec3(0.0, SkyEarthRadius() + 1.0, 0.0);
+
+    vec2 t_atmos = ray_sphere(origin, V, SkyAtmosphereRadius());
+    if (t_atmos.y < 0.0) return vec3(0.0);
+
+    float t_start = max(t_atmos.x, 0.0);
+    float t_end = t_atmos.y;
+
+    float step_size = (t_end - t_start) / float(SkyViewSteps());
+    vec3 in_scatter_R = vec3(0.0);
+    vec3 in_scatter_M = vec3(0.0);
+    vec3 T_cam = vec3(1.0);
+
+    float cos_theta = dot(V, L);
+    float ph_R = phase_rayleigh(cos_theta);
+    float ph_M = phase_mie(cos_theta);
+
+    for (int i = 0; i < SkyViewSteps(); i++)
+    {
+        float t = t_start + (float(i) + 0.5) * step_size;
+        vec3 pos = origin + V * t;
+
+        float altitude = max(length(pos) - SkyEarthRadius(), 0.0);
+        float rho_R = exp(-altitude / SkyScaleHeightRayleigh());
+        float rho_M = exp(-altitude / SkyScaleHeightMie());
+
+        vec3 T_slab = exp(-(SkyBetaR() * rho_R + SkyBetaM() * rho_M) * step_size);
+        T_cam *= T_slab;
+
+        vec3 sun_dir_at_pos = normalize(L);
+        if (dot(normalize(pos), sun_dir_at_pos) < -0.02) continue;
+
+        vec3 T_sun = transmittance(pos, L, 8);
+
+        vec3 scatter_R = SkyBetaR() * rho_R * ph_R * T_cam * T_sun;
+        vec3 scatter_M = SkyBetaM() * rho_M * ph_M * T_cam * T_sun;
+
+        in_scatter_R += scatter_R * step_size;
+        in_scatter_M += scatter_M * step_size;
+    }
+
+    vec3 color = SkySunRadiance() * (in_scatter_R + in_scatter_M);
+    return color;
+}
+
+vec3 sky_radiance(vec3 V, vec3 L, inout RNG rng)
+{
+    vec3 singleScatter = sky_tint(V, L);
+
+    vec3 multiScatterAccum = vec3(0.0);
+    for (int i = 0; i < SkySecondarySamples(); ++i)
+    {
+        vec3 jitteredSun = sample_cone(L, 0.09, rng);
+        multiScatterAccum += sky_tint(V, jitteredSun);
+    }
+    vec3 multiScatter = multiScatterAccum / float(SkySecondarySamples());
+    vec3 sky = mix(singleScatter, multiScatter, 0.35);
+
+    float disk = sun_disk(V, L);
+    vec3 origin = vec3(0.0, SkyEarthRadius() + 1.0, 0.0);
+    vec3 T_sun = transmittance(origin, L, 16);
+    vec3 directSun = disk * SkySunRadiance() * T_sun;
+
+    return sky + directSun;
+}
+
+vec3 render_sky_pixel(vec3 V, vec3 L, inout RNG rng)
+{
+    vec3 accum = vec3(0.0);
+    for (int i = 0; i < SkySamples(); i++)
+    {
+        accum += sky_radiance(V, L, rng);
+    }
+    accum /= float(SkySamples());
+
+    return accum;
+}
+
+#endif
