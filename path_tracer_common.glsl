@@ -5,19 +5,51 @@ layout(set = 0, binding = 0, rgba8) uniform writeonly image2D outputImage;
 layout(set = 0, binding = 1) uniform accelerationStructureEXT topLevelAS;
 layout(set = 0, binding = 2) uniform SceneData
 {
-    vec4 worldToObjectRow0;
-    vec4 worldToObjectRow1;
-    vec4 worldToObjectRow2;
-    vec4 materialAlbedoRoughness;
-    vec4 materialEmission;
-    vec4 materialEta;
-    vec4 materialExtinction;
     vec4 skyBetaRayleighBetaM;
     vec4 skyMieEarthAtmosScaleHr;
     vec4 skyScaleHmSunRadiusAa;
     vec4 skySunRadiance;
     uvec4 skySampleCounts;
 } sceneData;
+
+struct InstanceData
+{
+    uvec4 materialIndexFirstIndex;
+};
+
+struct MaterialData
+{
+    vec4 albedoRoughness;
+    vec4 emission;
+    vec4 eta;
+    vec4 extinction;
+};
+
+struct VertexData
+{
+    vec4 position;
+    vec4 normal;
+};
+
+layout(std430, set = 0, binding = 3) readonly buffer InstanceBuffer
+{
+    InstanceData instances[];
+} instanceBuffer;
+
+layout(std430, set = 0, binding = 4) readonly buffer MaterialBuffer
+{
+    MaterialData materials[];
+} materialBuffer;
+
+layout(std430, set = 0, binding = 5) readonly buffer VertexBuffer
+{
+    VertexData vertices[];
+} vertexBuffer;
+
+layout(std430, set = 0, binding = 6) readonly buffer IndexBuffer
+{
+    uint indices[];
+} indexBuffer;
 
 layout(push_constant) uniform PushConstants
 {
@@ -110,35 +142,40 @@ vec3 FresnelReflectance(float cosThetaI, vec3 eta, vec3 extinction)
     return clamp(0.5 * (rs + rp), vec3(0.0), vec3(1.0));
 }
 
-vec3 TransformPointToObject(vec3 worldPoint)
+Material GetInstanceMaterial(InstanceData instanceData)
 {
-    return vec3(dot(sceneData.worldToObjectRow0.xyz, worldPoint) + sceneData.worldToObjectRow0.w,
-                dot(sceneData.worldToObjectRow1.xyz, worldPoint) + sceneData.worldToObjectRow1.w,
-                dot(sceneData.worldToObjectRow2.xyz, worldPoint) + sceneData.worldToObjectRow2.w);
+    Material material;
+    MaterialData materialData = materialBuffer.materials[instanceData.materialIndexFirstIndex.x];
+    material.albedo = materialData.albedoRoughness.xyz;
+    material.emission = materialData.emission.xyz;
+    material.roughness = materialData.albedoRoughness.w;
+    material.eta = materialData.eta.xyz;
+    material.extinction = materialData.extinction.xyz;
+    return material;
 }
 
-vec3 TransformNormalToWorld(vec3 objectNormal)
+vec3 GetTriangleObjectNormal(InstanceData instanceData, uint primitiveId, vec2 barycentrics)
 {
-    return normalize(vec3(sceneData.worldToObjectRow0.x * objectNormal.x
-                          + sceneData.worldToObjectRow1.x * objectNormal.y
-                          + sceneData.worldToObjectRow2.x * objectNormal.z,
-                          sceneData.worldToObjectRow0.y * objectNormal.x
-                          + sceneData.worldToObjectRow1.y * objectNormal.y
-                          + sceneData.worldToObjectRow2.y * objectNormal.z,
-                          sceneData.worldToObjectRow0.z * objectNormal.x
-                          + sceneData.worldToObjectRow1.z * objectNormal.y
-                          + sceneData.worldToObjectRow2.z * objectNormal.z));
+    uint firstIndex = instanceData.materialIndexFirstIndex.y + primitiveId * 3u;
+    VertexData v0 = vertexBuffer.vertices[indexBuffer.indices[firstIndex + 0u]];
+    VertexData v1 = vertexBuffer.vertices[indexBuffer.indices[firstIndex + 1u]];
+    VertexData v2 = vertexBuffer.vertices[indexBuffer.indices[firstIndex + 2u]];
+
+    vec3 bary = vec3(1.0 - barycentrics.x - barycentrics.y, barycentrics.x, barycentrics.y);
+    vec3 interpolatedNormal = v0.normal.xyz * bary.x + v1.normal.xyz * bary.y + v2.normal.xyz * bary.z;
+    if (length(interpolatedNormal) > 1.0e-6)
+    {
+        return normalize(interpolatedNormal);
+    }
+
+    vec3 edge0 = v1.position.xyz - v0.position.xyz;
+    vec3 edge1 = v2.position.xyz - v0.position.xyz;
+    return normalize(cross(edge0, edge1));
 }
 
-Material GetSphereMaterial()
+vec3 TransformNormalToWorld(vec3 objectNormal, mat3 worldToObjectLinear)
 {
-    Material metal;
-    metal.albedo = sceneData.materialAlbedoRoughness.xyz;
-    metal.emission = sceneData.materialEmission.xyz;
-    metal.roughness = sceneData.materialAlbedoRoughness.w;
-    metal.eta = sceneData.materialEta.xyz;
-    metal.extinction = sceneData.materialExtinction.xyz;
-    return metal;
+    return normalize(transpose(worldToObjectLinear) * objectNormal);
 }
 
 #endif

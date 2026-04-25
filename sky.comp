@@ -160,7 +160,7 @@ vec3 transmittance(vec3 origin, vec3 dir, int steps)
 
 float phase_rayleigh(float cos_theta)
 {
-    return 3.0 / (16.0 * PI) * (1.0 + cos_theta * cos_theta);
+    return 0.75 * (1.0 + cos_theta * cos_theta);
 }
 
 float phase_mie(float cos_theta)
@@ -240,6 +240,7 @@ vec3 sky_radiance(vec3 V, vec3 L, inout RNG rng)
         vec3 jitteredSun = sample_cone(L, 0.09, rng);
         multiScatterAccum += sky_tint(V, jitteredSun);
     }
+
     vec3 multiScatter = multiScatterAccum / float(SkySecondarySamples());
     vec3 sky = mix(singleScatter, multiScatter, 0.35);
 

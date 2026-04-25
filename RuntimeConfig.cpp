@@ -9,9 +9,13 @@
 #include <cctype>
 #include <cstdlib>
 #include <fstream>
-#include <optional>
+#include <limits>
+#include <map>
 #include <stdexcept>
 #include <string_view>
+#include <unordered_map>
+#include <utility>
+#include <variant>
 
 std::filesystem::path ResolveRuntimeFilePath(const wchar_t* fileName)
 {
@@ -65,193 +69,656 @@ std::string LoadTextFile(const std::filesystem::path& filePath)
     return data;
 }
 
-static size_t SkipJsonWhitespace(std::string_view text, size_t position)
+namespace
 {
-    while (position < text.size() && std::isspace(static_cast<unsigned char>(text[position])))
-    {
-        ++position;
-    }
-    return position;
-}
-
-static std::optional<size_t> FindJsonValueStart(std::string_view text, const char* key)
+struct JsonValue
 {
-    const std::string needle = "\"" + std::string(key) + "\"";
-    const size_t keyPosition = text.find(needle);
-    if (keyPosition == std::string_view::npos)
+    using Array = std::vector<JsonValue>;
+    using Object = std::map<std::string, JsonValue>;
+
+    std::variant<std::nullptr_t, bool, double, std::string, Array, Object> data = nullptr;
+
+    JsonValue() = default;
+    explicit JsonValue(std::nullptr_t value) : data(value) {}
+    explicit JsonValue(bool value) : data(value) {}
+    explicit JsonValue(double value) : data(value) {}
+    explicit JsonValue(std::string value) : data(std::move(value)) {}
+    explicit JsonValue(Array value) : data(std::move(value)) {}
+    explicit JsonValue(Object value) : data(std::move(value)) {}
+
+    const Object& AsObject(const std::string& context) const
     {
-        return std::nullopt;
+        const auto* object = std::get_if<Object>(&data);
+        if (object == nullptr)
+        {
+            throw std::runtime_error(context + " must be an object.");
+        }
+        return *object;
     }
 
-    const size_t colonPosition = SkipJsonWhitespace(text, keyPosition + needle.size());
-    if (colonPosition >= text.size() || text[colonPosition] != ':')
+    const Array& AsArray(const std::string& context) const
     {
-        throw std::runtime_error("Invalid JSON syntax near a config key.");
+        const auto* array = std::get_if<Array>(&data);
+        if (array == nullptr)
+        {
+            throw std::runtime_error(context + " must be an array.");
+        }
+        return *array;
     }
 
-    return SkipJsonWhitespace(text, colonPosition + 1);
-}
+    const std::string& AsString(const std::string& context) const
+    {
+        const auto* stringValue = std::get_if<std::string>(&data);
+        if (stringValue == nullptr)
+        {
+            throw std::runtime_error(context + " must be a string.");
+        }
+        return *stringValue;
+    }
 
-static float ParseJsonNumber(std::string_view text, size_t position, const char* key)
+    double AsNumber(const std::string& context) const
+    {
+        const auto* number = std::get_if<double>(&data);
+        if (number == nullptr)
+        {
+            throw std::runtime_error(context + " must be a number.");
+        }
+        return *number;
+    }
+};
+
+class JsonParser
 {
-    const char* begin = text.data() + position;
-    char* end = nullptr;
-    const float value = std::strtof(begin, &end);
-    if (end == begin)
-    {
-        throw std::runtime_error(std::string("Expected a numeric value for \"") + key + "\".");
-    }
-    return value;
-}
+public:
+    explicit JsonParser(std::string_view text) : m_text(text) {}
 
-static uint32_t ParseJsonUint32(std::string_view text, size_t position, const char* key)
-{
-    const char* begin = text.data() + position;
-    char* end = nullptr;
-    const unsigned long value = std::strtoul(begin, &end, 10);
-    if (end == begin)
+    JsonValue Parse()
     {
-        throw std::runtime_error(std::string("Expected an unsigned integer value for \"") + key + "\".");
-    }
-    if (value > 0xFFFFFFFFul)
-    {
-        throw std::runtime_error(std::string("Value for \"") + key + "\" exceeds uint32 range.");
-    }
-    return static_cast<uint32_t>(value);
-}
-
-static std::array<float, 3> ParseJsonFloat3(std::string_view text, size_t position, const char* key)
-{
-    position = SkipJsonWhitespace(text, position);
-    if (position >= text.size() || text[position] != '[')
-    {
-        throw std::runtime_error(std::string("Expected an array value for \"") + key + "\".");
+        JsonValue value = ParseValue();
+        SkipWhitespace();
+        if (!IsAtEnd())
+        {
+            throw std::runtime_error("Unexpected trailing characters after JSON document.");
+        }
+        return value;
     }
 
-    std::array<float, 3> result{};
-    ++position;
-    for (size_t i = 0; i < result.size(); ++i)
+private:
+    JsonValue ParseValue()
     {
-        position = SkipJsonWhitespace(text, position);
-        const char* begin = text.data() + position;
+        SkipWhitespace();
+        if (IsAtEnd())
+        {
+            throw std::runtime_error("Unexpected end of JSON input.");
+        }
+
+        const char current = m_text[m_position];
+        if (current == '{')
+        {
+            return ParseObject();
+        }
+        if (current == '[')
+        {
+            return ParseArray();
+        }
+        if (current == '"')
+        {
+            return JsonValue(ParseString());
+        }
+        if (current == 't')
+        {
+            ConsumeLiteral("true");
+            return JsonValue(true);
+        }
+        if (current == 'f')
+        {
+            ConsumeLiteral("false");
+            return JsonValue(false);
+        }
+        if (current == 'n')
+        {
+            ConsumeLiteral("null");
+            return JsonValue(nullptr);
+        }
+        if (current == '-' || std::isdigit(static_cast<unsigned char>(current)))
+        {
+            return JsonValue(ParseNumber());
+        }
+
+        throw std::runtime_error("Unexpected token in JSON input.");
+    }
+
+    JsonValue ParseObject()
+    {
+        Consume('{');
+
+        JsonValue::Object object;
+        SkipWhitespace();
+        if (TryConsume('}'))
+        {
+            return JsonValue(std::move(object));
+        }
+
+        while (true)
+        {
+            SkipWhitespace();
+            if (Peek() != '"')
+            {
+                throw std::runtime_error("Expected a JSON object key.");
+            }
+
+            std::string key = ParseString();
+            SkipWhitespace();
+            Consume(':');
+            JsonValue value = ParseValue();
+
+            auto [_, inserted] = object.emplace(key, std::move(value));
+            if (!inserted)
+            {
+                throw std::runtime_error("Duplicate JSON key \"" + key + "\".");
+            }
+
+            SkipWhitespace();
+            if (TryConsume('}'))
+            {
+                break;
+            }
+            Consume(',');
+        }
+
+        return JsonValue(std::move(object));
+    }
+
+    JsonValue ParseArray()
+    {
+        Consume('[');
+
+        JsonValue::Array array;
+        SkipWhitespace();
+        if (TryConsume(']'))
+        {
+            return JsonValue(std::move(array));
+        }
+
+        while (true)
+        {
+            array.push_back(ParseValue());
+            SkipWhitespace();
+            if (TryConsume(']'))
+            {
+                break;
+            }
+            Consume(',');
+        }
+
+        return JsonValue(std::move(array));
+    }
+
+    std::string ParseString()
+    {
+        Consume('"');
+
+        std::string result;
+        while (!IsAtEnd())
+        {
+            const char current = m_text[m_position++];
+            if (current == '"')
+            {
+                return result;
+            }
+            if (current == '\\')
+            {
+                if (IsAtEnd())
+                {
+                    throw std::runtime_error("Unterminated escape sequence in JSON string.");
+                }
+
+                const char escaped = m_text[m_position++];
+                switch (escaped)
+                {
+                case '"':
+                case '\\':
+                case '/':
+                    result.push_back(escaped);
+                    break;
+                case 'b':
+                    result.push_back('\b');
+                    break;
+                case 'f':
+                    result.push_back('\f');
+                    break;
+                case 'n':
+                    result.push_back('\n');
+                    break;
+                case 'r':
+                    result.push_back('\r');
+                    break;
+                case 't':
+                    result.push_back('\t');
+                    break;
+                default:
+                    throw std::runtime_error("Unsupported JSON string escape sequence.");
+                }
+                continue;
+            }
+            if (static_cast<unsigned char>(current) < 0x20)
+            {
+                throw std::runtime_error("Control characters are not allowed in JSON strings.");
+            }
+            result.push_back(current);
+        }
+
+        throw std::runtime_error("Unterminated JSON string.");
+    }
+
+    double ParseNumber()
+    {
+        const char* begin = m_text.data() + m_position;
         char* end = nullptr;
-        result[i] = std::strtof(begin, &end);
+        const double value = std::strtod(begin, &end);
         if (end == begin)
         {
-            throw std::runtime_error(std::string("Expected a numeric array element for \"") + key + "\".");
+            throw std::runtime_error("Expected a JSON number.");
         }
 
-        position = SkipJsonWhitespace(text, static_cast<size_t>(end - text.data()));
-        if (i + 1 < result.size())
+        m_position = static_cast<size_t>(end - m_text.data());
+        return value;
+    }
+
+    void ConsumeLiteral(std::string_view literal)
+    {
+        if (m_text.substr(m_position, literal.size()) != literal)
         {
-            if (position >= text.size() || text[position] != ',')
-            {
-                throw std::runtime_error(std::string("Expected a comma in array value for \"") + key + "\".");
-            }
-            ++position;
+            throw std::runtime_error("Invalid JSON literal.");
+        }
+        m_position += literal.size();
+    }
+
+    void Consume(char expected)
+    {
+        SkipWhitespace();
+        if (IsAtEnd() || m_text[m_position] != expected)
+        {
+            throw std::runtime_error(std::string("Expected '") + expected + "' in JSON input.");
+        }
+        ++m_position;
+    }
+
+    bool TryConsume(char expected)
+    {
+        SkipWhitespace();
+        if (IsAtEnd() || m_text[m_position] != expected)
+        {
+            return false;
+        }
+        ++m_position;
+        return true;
+    }
+
+    char Peek() const
+    {
+        if (IsAtEnd())
+        {
+            return '\0';
+        }
+        return m_text[m_position];
+    }
+
+    void SkipWhitespace()
+    {
+        while (!IsAtEnd() && std::isspace(static_cast<unsigned char>(m_text[m_position])))
+        {
+            ++m_position;
         }
     }
 
-    position = SkipJsonWhitespace(text, position);
-    if (position >= text.size() || text[position] != ']')
+    bool IsAtEnd() const
     {
-        throw std::runtime_error(std::string("Expected a closing bracket for \"") + key + "\".");
+        return m_position >= m_text.size();
     }
 
-    return result;
+    std::string_view m_text;
+    size_t m_position = 0;
+};
+
+std::string Quote(std::string_view value)
+{
+    return "\"" + std::string(value) + "\"";
 }
 
-static void ParseOptionalJsonNumber(std::string_view text, const char* key, float& target)
+const JsonValue* FindMember(const JsonValue::Object& object, std::string_view key)
 {
-    const auto valueStart = FindJsonValueStart(text, key);
-    if (!valueStart.has_value())
+    const auto iterator = object.find(std::string(key));
+    if (iterator == object.end())
+    {
+        return nullptr;
+    }
+    return &iterator->second;
+}
+
+float ParseFloatValue(const JsonValue& value, const std::string& context)
+{
+    const double number = value.AsNumber(context);
+    if (!std::isfinite(number)
+        || number < -static_cast<double>(std::numeric_limits<float>::max())
+        || number > static_cast<double>(std::numeric_limits<float>::max()))
+    {
+        throw std::runtime_error(context + " must be a finite float.");
+    }
+    return static_cast<float>(number);
+}
+
+uint32_t ParseUint32Value(const JsonValue& value, const std::string& context)
+{
+    const double number = value.AsNumber(context);
+    if (!std::isfinite(number) || number < 0.0 || number > static_cast<double>(std::numeric_limits<uint32_t>::max())
+        || std::floor(number) != number)
+    {
+        throw std::runtime_error(context + " must be a uint32 value.");
+    }
+    return static_cast<uint32_t>(number);
+}
+
+std::array<float, 3> ParseFloat3Value(const JsonValue& value, const std::string& context)
+{
+    const auto& array = value.AsArray(context);
+    if (array.size() != 3)
+    {
+        throw std::runtime_error(context + " must contain exactly three numeric values.");
+    }
+
+    return {
+        ParseFloatValue(array[0], context + "[0]"),
+        ParseFloatValue(array[1], context + "[1]"),
+        ParseFloatValue(array[2], context + "[2]"),
+    };
+}
+
+void ParseOptionalJsonNumber(const JsonValue::Object& object, std::string_view key, float& target)
+{
+    const JsonValue* value = FindMember(object, key);
+    if (value == nullptr)
     {
         return;
     }
-    target = ParseJsonNumber(text, valueStart.value(), key);
+    target = ParseFloatValue(*value, Quote(key));
 }
 
-static void ParseOptionalJsonUint32(std::string_view text, const char* key, uint32_t& target)
+void ParseOptionalJsonUint32(const JsonValue::Object& object, std::string_view key, uint32_t& target)
 {
-    const auto valueStart = FindJsonValueStart(text, key);
-    if (!valueStart.has_value())
+    const JsonValue* value = FindMember(object, key);
+    if (value == nullptr)
     {
         return;
     }
-    target = ParseJsonUint32(text, valueStart.value(), key);
+    target = ParseUint32Value(*value, Quote(key));
 }
 
-static void ParseOptionalJsonVec3(std::string_view text, const char* key, Vec3& target)
+void ParseOptionalJsonVec3(const JsonValue::Object& object, std::string_view key, Vec3& target)
 {
-    const auto valueStart = FindJsonValueStart(text, key);
-    if (!valueStart.has_value())
+    const JsonValue* value = FindMember(object, key);
+    if (value == nullptr)
     {
         return;
     }
 
-    const auto values = ParseJsonFloat3(text, valueStart.value(), key);
-    target = {values[0], values[1], values[2]};
+    const auto parsed = ParseFloat3Value(*value, Quote(key));
+    target = {parsed[0], parsed[1], parsed[2]};
 }
 
-static void ParseOptionalJsonFloat3(std::string_view text, const char* key, std::array<float, 3>& target)
+void ParseOptionalJsonFloat3(const JsonValue::Object& object,
+                             std::string_view key,
+                             std::array<float, 3>& target)
 {
-    const auto valueStart = FindJsonValueStart(text, key);
-    if (!valueStart.has_value())
+    const JsonValue* value = FindMember(object, key);
+    if (value == nullptr)
     {
         return;
     }
-    target = ParseJsonFloat3(text, valueStart.value(), key);
+    target = ParseFloat3Value(*value, Quote(key));
 }
 
-static bool HasNegativeElement(const std::array<float, 3>& value)
+bool HasNegativeElement(const std::array<float, 3>& value)
 {
     return value[0] < 0.0f || value[1] < 0.0f || value[2] < 0.0f;
 }
 
+MaterialConfig ParseMaterialConfig(const JsonValue::Object& object)
+{
+    MaterialConfig material{};
+    ParseOptionalJsonFloat3(object, "albedo", material.albedo);
+    ParseOptionalJsonFloat3(object, "emission", material.emission);
+    ParseOptionalJsonNumber(object, "roughness", material.roughness);
+    ParseOptionalJsonFloat3(object, "eta", material.eta);
+    ParseOptionalJsonFloat3(object, "extinction", material.extinction);
+    return material;
+}
+
+ModelAssetConfig ParseModelAssetConfig(const JsonValue::Object& object, const std::string& context)
+{
+    ModelAssetConfig model{};
+    const JsonValue* fileValue = FindMember(object, "file");
+    if (fileValue == nullptr)
+    {
+        throw std::runtime_error(context + " must define a \"file\" entry.");
+    }
+    model.fileName = fileValue->AsString(context + " \"file\"");
+    if (model.fileName.empty())
+    {
+        throw std::runtime_error(context + " must define a non-empty \"file\".");
+    }
+    return model;
+}
+
+void ParseSections(const JsonValue::Object& root, RuntimeConfig& config)
+{
+    if (const JsonValue* renderValue = FindMember(root, "render"))
+    {
+        const auto& render = renderValue->AsObject("\"render\"");
+        ParseOptionalJsonUint32(render, "width", config.width);
+        ParseOptionalJsonUint32(render, "height", config.height);
+        ParseOptionalJsonUint32(render, "frameCount", config.frameCount);
+        ParseOptionalJsonUint32(render, "samplesPerPixel", config.samplesPerPixel);
+        ParseOptionalJsonUint32(render, "maxBounces", config.maxBounces);
+    }
+
+    if (const JsonValue* cameraValue = FindMember(root, "camera"))
+    {
+        const auto& camera = cameraValue->AsObject("\"camera\"");
+        ParseOptionalJsonVec3(camera, "initialPosition", config.initialPosition);
+        ParseOptionalJsonVec3(camera, "initialLookAt", config.initialLookAt);
+        ParseOptionalJsonNumber(camera, "fovYDegrees", config.fovYDegrees);
+        ParseOptionalJsonNumber(camera, "maxPitchDegrees", config.maxPitchDegrees);
+    }
+
+    if (const JsonValue* inputValue = FindMember(root, "input"))
+    {
+        const auto& input = inputValue->AsObject("\"input\"");
+        ParseOptionalJsonNumber(input, "moveSpeed", config.moveSpeed);
+        ParseOptionalJsonNumber(input, "fastMoveSpeed", config.fastMoveSpeed);
+        ParseOptionalJsonNumber(input, "mouseSensitivity", config.mouseSensitivity);
+        ParseOptionalJsonNumber(input, "keyLookSpeed", config.keyLookSpeed);
+    }
+
+    if (const JsonValue* skyValue = FindMember(root, "sky"))
+    {
+        const auto& sky = skyValue->AsObject("\"sky\"");
+        ParseOptionalJsonFloat3(sky, "bottomColor", config.skyBottomColor);
+        ParseOptionalJsonNumber(sky, "exposure", config.skyExposure);
+        ParseOptionalJsonFloat3(sky, "topColor", config.skyTopColor);
+
+        if (const JsonValue* spectralValue = FindMember(sky, "spectralConstants"))
+        {
+            const auto& spectral = spectralValue->AsObject("\"sky.spectralConstants\"");
+            ParseOptionalJsonFloat3(spectral, "BETA_R", config.skySpectral.betaRayleigh);
+            ParseOptionalJsonNumber(spectral, "BETA_M", config.skySpectral.betaMie);
+            ParseOptionalJsonNumber(spectral, "MIE_G", config.skySpectral.mieG);
+            ParseOptionalJsonNumber(spectral, "EARTH_R", config.skySpectral.earthRadius);
+            ParseOptionalJsonNumber(spectral, "ATMOS_R", config.skySpectral.atmosphereRadius);
+            ParseOptionalJsonNumber(spectral, "SCALE_H_R", config.skySpectral.scaleHeightRayleigh);
+            ParseOptionalJsonNumber(spectral, "SCALE_H_M", config.skySpectral.scaleHeightMie);
+            ParseOptionalJsonFloat3(spectral, "SUN_RADIANCE", config.skySpectral.sunRadiance);
+            ParseOptionalJsonNumber(spectral, "SUN_RADIUS", config.skySpectral.sunRadius);
+            ParseOptionalJsonNumber(spectral, "SUN_AA", config.skySpectral.sunAa);
+            ParseOptionalJsonUint32(spectral, "secondarySamples", config.skySpectral.secondarySamples);
+            ParseOptionalJsonUint32(spectral, "VIEW_STEPS", config.skySpectral.viewSteps);
+            ParseOptionalJsonUint32(spectral, "Samples", config.skySpectral.samples);
+        }
+    }
+}
+
+void ParseSceneConfig(const JsonValue::Object& root, RuntimeConfig& config)
+{
+    const JsonValue* materialsValue = FindMember(root, "materials");
+    const JsonValue* modelsValue = FindMember(root, "models");
+    const JsonValue* instancesValue = FindMember(root, "instances");
+    if (materialsValue == nullptr || modelsValue == nullptr || instancesValue == nullptr)
+    {
+        throw std::runtime_error("The config must define \"models\", \"materials\", and \"instances\".");
+    }
+
+    config.materials.clear();
+    config.models.clear();
+    config.instances.clear();
+
+    std::unordered_map<std::string, uint32_t> materialLookup;
+    const auto& materials = materialsValue->AsObject("\"materials\"");
+    if (materials.empty())
+    {
+        throw std::runtime_error("\"materials\" must define at least one material.");
+    }
+    materialLookup.reserve(materials.size());
+    for (const auto& [name, materialValue] : materials)
+    {
+        const auto& materialObject = materialValue.AsObject("Material " + Quote(name));
+        const uint32_t materialIndex = static_cast<uint32_t>(config.materials.size());
+        config.materials.push_back(ParseMaterialConfig(materialObject));
+        materialLookup.emplace(name, materialIndex);
+    }
+
+    std::unordered_map<std::string, uint32_t> modelLookup;
+    const auto& models = modelsValue->AsObject("\"models\"");
+    if (models.empty())
+    {
+        throw std::runtime_error("\"models\" must define at least one model.");
+    }
+    modelLookup.reserve(models.size());
+    for (const auto& [name, modelValue] : models)
+    {
+        const auto& modelObject = modelValue.AsObject("Model " + Quote(name));
+        const uint32_t modelIndex = static_cast<uint32_t>(config.models.size());
+        config.models.push_back(ParseModelAssetConfig(modelObject, "Model " + Quote(name)));
+        modelLookup.emplace(name, modelIndex);
+    }
+
+    const auto& instances = instancesValue->AsArray("\"instances\"");
+    if (instances.empty())
+    {
+        throw std::runtime_error("\"instances\" must contain at least one instance.");
+    }
+
+    config.instances.reserve(instances.size());
+    for (size_t instanceIndex = 0; instanceIndex < instances.size(); ++instanceIndex)
+    {
+        const std::string context = "Instance at index " + std::to_string(instanceIndex);
+        const auto& instanceObject = instances[instanceIndex].AsObject(context);
+
+        ModelInstanceConfig instance{};
+        ParseOptionalJsonVec3(instanceObject, "position", instance.position);
+        ParseOptionalJsonVec3(instanceObject, "rotationDegrees", instance.rotationDegrees);
+        ParseOptionalJsonVec3(instanceObject, "scale", instance.scale);
+
+        const JsonValue* modelRefValue = FindMember(instanceObject, "model");
+        if (modelRefValue == nullptr)
+        {
+            throw std::runtime_error(context + " must define a \"model\" reference.");
+        }
+        const std::string& modelName = modelRefValue->AsString(context + " \"model\"");
+        const auto modelIt = modelLookup.find(modelName);
+        if (modelIt == modelLookup.end())
+        {
+            throw std::runtime_error(context + " references unknown model " + Quote(modelName) + ".");
+        }
+        instance.modelIndex = modelIt->second;
+
+        const JsonValue* materialRefValue = FindMember(instanceObject, "material");
+        if (materialRefValue == nullptr)
+        {
+            throw std::runtime_error(context + " must define a \"material\" reference.");
+        }
+        const std::string& materialName = materialRefValue->AsString(context + " \"material\"");
+        const auto materialIt = materialLookup.find(materialName);
+        if (materialIt == materialLookup.end())
+        {
+            throw std::runtime_error(context + " references unknown material " + Quote(materialName) + ".");
+        }
+        instance.materialIndex = materialIt->second;
+
+        config.instances.push_back(instance);
+    }
+}
+
+void ValidateMaterial(const MaterialConfig& material)
+{
+    if (HasNegativeElement(material.albedo) || material.albedo[0] > 1.0f || material.albedo[1] > 1.0f
+        || material.albedo[2] > 1.0f)
+    {
+        throw std::runtime_error("\"albedo\" values must be between 0 and 1.");
+    }
+    if (HasNegativeElement(material.emission))
+    {
+        throw std::runtime_error("\"emission\" values must be non-negative.");
+    }
+    if (material.roughness < 0.0f || material.roughness > 1.0f)
+    {
+        throw std::runtime_error("\"roughness\" must be between 0 and 1.");
+    }
+    if (HasNegativeElement(material.eta))
+    {
+        throw std::runtime_error("\"eta\" values must be non-negative.");
+    }
+    if (HasNegativeElement(material.extinction))
+    {
+        throw std::runtime_error("\"extinction\" values must be non-negative.");
+    }
+}
+
+void ValidateModelAsset(const ModelAssetConfig& model, size_t modelIndex)
+{
+    if (model.fileName.empty())
+    {
+        throw std::runtime_error("Model at index " + std::to_string(modelIndex) + " must define a file name.");
+    }
+}
+
+void ValidateInstance(const ModelInstanceConfig& instance, size_t instanceIndex, const RuntimeConfig& config)
+{
+    if (instance.scale.x <= 0.0f || instance.scale.y <= 0.0f || instance.scale.z <= 0.0f)
+    {
+        throw std::runtime_error("Instance at index " + std::to_string(instanceIndex)
+                                 + " must have positive scale values on every axis.");
+    }
+    if (instance.modelIndex >= config.models.size())
+    {
+        throw std::runtime_error("Instance at index " + std::to_string(instanceIndex)
+                                 + " references a model index outside the model list.");
+    }
+    if (instance.materialIndex >= config.materials.size())
+    {
+        throw std::runtime_error("Instance at index " + std::to_string(instanceIndex)
+                                 + " references a material index outside the material list.");
+    }
+}
+} // namespace
+
 RuntimeConfig ParseRuntimeConfig(const std::string& jsonText)
 {
     RuntimeConfig config{};
-    const std::string_view jsonView(jsonText);
+    const JsonValue rootValue = JsonParser(std::string_view(jsonText)).Parse();
+    const auto& root = rootValue.AsObject("Root config");
 
-    ParseOptionalJsonUint32(jsonView, "width", config.width);
-    ParseOptionalJsonUint32(jsonView, "height", config.height);
-    ParseOptionalJsonUint32(jsonView, "frameCount", config.frameCount);
-    ParseOptionalJsonUint32(jsonView, "samplesPerPixel", config.samplesPerPixel);
-    ParseOptionalJsonUint32(jsonView, "maxBounces", config.maxBounces);
-    ParseOptionalJsonVec3(jsonView, "initialPosition", config.initialPosition);
-    ParseOptionalJsonVec3(jsonView, "initialLookAt", config.initialLookAt);
-    ParseOptionalJsonNumber(jsonView, "fovYDegrees", config.fovYDegrees);
-    ParseOptionalJsonNumber(jsonView, "moveSpeed", config.moveSpeed);
-    ParseOptionalJsonNumber(jsonView, "fastMoveSpeed", config.fastMoveSpeed);
-    ParseOptionalJsonNumber(jsonView, "mouseSensitivity", config.mouseSensitivity);
-    ParseOptionalJsonNumber(jsonView, "keyLookSpeed", config.keyLookSpeed);
-    ParseOptionalJsonNumber(jsonView, "maxPitchDegrees", config.maxPitchDegrees);
-    ParseOptionalJsonFloat3(jsonView, "bottomColor", config.skyBottomColor);
-    ParseOptionalJsonNumber(jsonView, "exposure", config.skyExposure);
-    ParseOptionalJsonFloat3(jsonView, "topColor", config.skyTopColor);
-    ParseOptionalJsonFloat3(jsonView, "BETA_R", config.skySpectral.betaRayleigh);
-    ParseOptionalJsonNumber(jsonView, "BETA_M", config.skySpectral.betaMie);
-    ParseOptionalJsonNumber(jsonView, "MIE_G", config.skySpectral.mieG);
-    ParseOptionalJsonNumber(jsonView, "EARTH_R", config.skySpectral.earthRadius);
-    ParseOptionalJsonNumber(jsonView, "ATMOS_R", config.skySpectral.atmosphereRadius);
-    ParseOptionalJsonNumber(jsonView, "SCALE_H_R", config.skySpectral.scaleHeightRayleigh);
-    ParseOptionalJsonNumber(jsonView, "SCALE_H_M", config.skySpectral.scaleHeightMie);
-    ParseOptionalJsonFloat3(jsonView, "SUN_RADIANCE", config.skySpectral.sunRadiance);
-    ParseOptionalJsonNumber(jsonView, "SUN_RADIUS", config.skySpectral.sunRadius);
-    ParseOptionalJsonNumber(jsonView, "SUN_AA", config.skySpectral.sunAa);
-    ParseOptionalJsonUint32(jsonView, "secondarySamples", config.skySpectral.secondarySamples);
-    ParseOptionalJsonUint32(jsonView, "VIEW_STEPS", config.skySpectral.viewSteps);
-    ParseOptionalJsonUint32(jsonView, "Samples", config.skySpectral.samples);
-    ParseOptionalJsonVec3(jsonView, "position", config.sphere.position);
-    ParseOptionalJsonVec3(jsonView, "rotationDegrees", config.sphere.rotationDegrees);
-    ParseOptionalJsonVec3(jsonView, "scale", config.sphere.scale);
-    ParseOptionalJsonUint32(jsonView, "longitudeSegments", config.sphere.longitudeSegments);
-    ParseOptionalJsonUint32(jsonView, "latitudeSegments", config.sphere.latitudeSegments);
-    ParseOptionalJsonFloat3(jsonView, "albedo", config.sphere.material.albedo);
-    ParseOptionalJsonFloat3(jsonView, "emission", config.sphere.material.emission);
-    ParseOptionalJsonNumber(jsonView, "roughness", config.sphere.material.roughness);
-    ParseOptionalJsonFloat3(jsonView, "eta", config.sphere.material.eta);
-    ParseOptionalJsonFloat3(jsonView, "extinction", config.sphere.material.extinction);
+    ParseSections(root, config);
+    ParseSceneConfig(root, config);
 
     if (config.width == 0 || config.height == 0)
     {
@@ -322,38 +789,34 @@ RuntimeConfig ParseRuntimeConfig(const std::string& jsonText)
     {
         throw std::runtime_error("Sky sample counts must be greater than 0.");
     }
-    if (config.sphere.scale.x <= 0.0f || config.sphere.scale.y <= 0.0f || config.sphere.scale.z <= 0.0f)
+    if (config.models.empty())
     {
-        throw std::runtime_error("\"scale\" must have positive values for all three axes.");
+        throw std::runtime_error("At least one model must be defined.");
     }
-    if (config.sphere.longitudeSegments < 3)
+    if (config.materials.empty())
     {
-        throw std::runtime_error("\"longitudeSegments\" must be at least 3.");
+        throw std::runtime_error("At least one material must be defined.");
     }
-    if (config.sphere.latitudeSegments < 2)
+    if (config.instances.empty())
     {
-        throw std::runtime_error("\"latitudeSegments\" must be at least 2.");
+        throw std::runtime_error("At least one instance must be defined.");
     }
-    if (HasNegativeElement(config.sphere.material.albedo) || config.sphere.material.albedo[0] > 1.0f
-        || config.sphere.material.albedo[1] > 1.0f || config.sphere.material.albedo[2] > 1.0f)
+    if (config.instances.size() > 0x00FFFFFFu)
     {
-        throw std::runtime_error("\"albedo\" values must be between 0 and 1.");
+        throw std::runtime_error("Instance count exceeds the Vulkan instanceCustomIndex limit.");
     }
-    if (HasNegativeElement(config.sphere.material.emission))
+
+    for (size_t modelIndex = 0; modelIndex < config.models.size(); ++modelIndex)
     {
-        throw std::runtime_error("\"emission\" values must be non-negative.");
+        ValidateModelAsset(config.models[modelIndex], modelIndex);
     }
-    if (config.sphere.material.roughness < 0.0f || config.sphere.material.roughness > 1.0f)
+    for (const MaterialConfig& material : config.materials)
     {
-        throw std::runtime_error("\"roughness\" must be between 0 and 1.");
+        ValidateMaterial(material);
     }
-    if (HasNegativeElement(config.sphere.material.eta))
+    for (size_t instanceIndex = 0; instanceIndex < config.instances.size(); ++instanceIndex)
     {
-        throw std::runtime_error("\"eta\" values must be non-negative.");
-    }
-    if (HasNegativeElement(config.sphere.material.extinction))
-    {
-        throw std::runtime_error("\"extinction\" values must be non-negative.");
+        ValidateInstance(config.instances[instanceIndex], instanceIndex, config);
     }
 
     return config;

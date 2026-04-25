@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <string>
+#include <vector>
 
 inline constexpr float kPi = 3.14159265358979323846f;
 
@@ -72,7 +73,7 @@ inline Vec3 Cross(const Vec3& left, const Vec3& right)
     };
 }
 
-struct SphereMaterialConfig
+struct MaterialConfig
 {
     std::array<float, 3> albedo{1.0f, 1.0f, 1.0f};
     std::array<float, 3> emission{0.0f, 0.0f, 0.0f};
@@ -81,15 +82,51 @@ struct SphereMaterialConfig
     std::array<float, 3> extinction{1.5f, 1.5f, 1.5f};
 };
 
-struct SphereConfig
+inline bool operator==(const MaterialConfig& left, const MaterialConfig& right)
+{
+    return left.albedo == right.albedo && left.emission == right.emission && left.roughness == right.roughness
+           && left.eta == right.eta && left.extinction == right.extinction;
+}
+
+inline bool operator!=(const MaterialConfig& left, const MaterialConfig& right)
+{
+    return !(left == right);
+}
+
+struct ModelAssetConfig
+{
+    std::string fileName = "box.obj";
+};
+
+inline bool operator==(const ModelAssetConfig& left, const ModelAssetConfig& right)
+{
+    return left.fileName == right.fileName;
+}
+
+inline bool operator!=(const ModelAssetConfig& left, const ModelAssetConfig& right)
+{
+    return !(left == right);
+}
+
+struct ModelInstanceConfig
 {
     Vec3 position{};
     Vec3 rotationDegrees{};
-    Vec3 scale{1.35f, 1.35f, 1.35f};
-    uint32_t longitudeSegments = 48;
-    uint32_t latitudeSegments = 24;
-    SphereMaterialConfig material{};
+    Vec3 scale{1.0f, 1.0f, 1.0f};
+    uint32_t modelIndex = 0;
+    uint32_t materialIndex = 0;
 };
+
+inline bool operator==(const ModelInstanceConfig& left, const ModelInstanceConfig& right)
+{
+    return left.position == right.position && left.rotationDegrees == right.rotationDegrees && left.scale == right.scale
+           && left.modelIndex == right.modelIndex && left.materialIndex == right.materialIndex;
+}
+
+inline bool operator!=(const ModelInstanceConfig& left, const ModelInstanceConfig& right)
+{
+    return !(left == right);
+}
 
 struct SkySpectralConfig
 {
@@ -127,7 +164,9 @@ struct RuntimeConfig
     float skyExposure = 1.35f;
     std::array<float, 3> skyTopColor{0.55f, 0.72f, 0.95f};
     SkySpectralConfig skySpectral{};
-    SphereConfig sphere{};
+    std::vector<ModelAssetConfig> models{ModelAssetConfig{}};
+    std::vector<MaterialConfig> materials{MaterialConfig{}};
+    std::vector<ModelInstanceConfig> instances{ModelInstanceConfig{}};
 };
 
 std::filesystem::path ResolveRuntimeFilePath(const wchar_t* fileName);

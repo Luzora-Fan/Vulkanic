@@ -4,8 +4,8 @@
 
 #include "VulkanPathTracer.h"
 
+#include "ObjModel.h"
 #include "RuntimeConfig.h"
-#include "SphereMesh.h"
 
 #include <windows.h>
 #include <vulkan/vulkan.h>
@@ -114,13 +114,6 @@ struct AccelerationStructureAllocation
 
 struct alignas(16) SceneData
 {
-    float worldToObjectRow0[4];
-    float worldToObjectRow1[4];
-    float worldToObjectRow2[4];
-    float materialAlbedoRoughness[4];
-    float materialEmission[4];
-    float materialEta[4];
-    float materialExtinction[4];
     float skyBetaRayleighBetaM[4];
     float skyMieEarthAtmosScaleHr[4];
     float skyScaleHmSunRadiusAa[4];
@@ -128,7 +121,40 @@ struct alignas(16) SceneData
     uint32_t skySampleCounts[4];
 };
 
-static_assert(sizeof(SceneData) == 192, "Scene data layout must stay 16-byte aligned.");
+static_assert(sizeof(SceneData) == 80, "Scene data layout must stay 16-byte aligned.");
+
+static_assert(sizeof(ModelVertex) == 32, "Model vertex layout must stay 16-byte aligned.");
+
+struct alignas(16) InstanceData
+{
+    uint32_t materialIndexFirstIndex[4];
+};
+
+static_assert(sizeof(InstanceData) == 16, "Instance data layout must stay 16-byte aligned.");
+
+struct alignas(16) MaterialData
+{
+    float albedoRoughness[4];
+    float emission[4];
+    float eta[4];
+    float extinction[4];
+};
+
+static_assert(sizeof(MaterialData) == 64, "Material data layout must stay 16-byte aligned.");
+
+struct ModelGeometryRange
+{
+    uint32_t firstVertex = 0;
+    uint32_t vertexCount = 0;
+    uint32_t firstIndex = 0;
+    uint32_t indexCount = 0;
+};
+
+struct ModelAccelerationStructure
+{
+    ModelGeometryRange geometry;
+    AccelerationStructureAllocation blas;
+};
 
 struct Mat3
 {
@@ -318,26 +344,53 @@ private:
         return (GetAsyncKeyState(virtualKey) & 0x8000) != 0;
     }
 
-    static bool HasSphereTransformChanged(const RuntimeConfig& left, const RuntimeConfig& right)
+    static bool HasModelDefinitionsChanged(const RuntimeConfig& left, const RuntimeConfig& right)
     {
-        return left.sphere.position != right.sphere.position
-               || left.sphere.rotationDegrees != right.sphere.rotationDegrees
-               || left.sphere.scale != right.sphere.scale;
+        return left.models != right.models;
     }
 
-    static bool HasSphereMaterialChanged(const RuntimeConfig& left, const RuntimeConfig& right)
+    static bool HasInstanceTransformChanged(const RuntimeConfig& left, const RuntimeConfig& right)
     {
-        return left.sphere.material.albedo != right.sphere.material.albedo
-               || left.sphere.material.emission != right.sphere.material.emission
-               || left.sphere.material.roughness != right.sphere.material.roughness
-               || left.sphere.material.eta != right.sphere.material.eta
-               || left.sphere.material.extinction != right.sphere.material.extinction;
+        if (left.instances.size() != right.instances.size())
+        {
+            return true;
+        }
+
+        for (size_t i = 0; i < left.instances.size(); ++i)
+        {
+            if (left.instances[i].position != right.instances[i].position
+                || left.instances[i].rotationDegrees != right.instances[i].rotationDegrees
+                || left.instances[i].scale != right.instances[i].scale)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
-    static bool HasSphereMeshResolutionChanged(const RuntimeConfig& left, const RuntimeConfig& right)
+    static bool HasInstanceBindingChanged(const RuntimeConfig& left, const RuntimeConfig& right)
     {
-        return left.sphere.longitudeSegments != right.sphere.longitudeSegments
-               || left.sphere.latitudeSegments != right.sphere.latitudeSegments;
+        if (left.instances.size() != right.instances.size())
+        {
+            return true;
+        }
+
+        for (size_t i = 0; i < left.instances.size(); ++i)
+        {
+            if (left.instances[i].modelIndex != right.instances[i].modelIndex
+                || left.instances[i].materialIndex != right.instances[i].materialIndex)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    static bool HasMaterialDataChanged(const RuntimeConfig& left, const RuntimeConfig& right)
+    {
+        return left.materials != right.materials;
     }
 
     float GetCameraMaxPitchRadians() const
@@ -347,38 +400,7 @@ private:
 
     SceneData BuildSceneData() const
     {
-        const Mat3 rotation = MakeEulerRotationMatrixDegrees(m_config.sphere.rotationDegrees);
-        const Mat3 inverseScale = MakeScaleMatrix(
-            {1.0f / m_config.sphere.scale.x, 1.0f / m_config.sphere.scale.y, 1.0f / m_config.sphere.scale.z});
-        const Mat3 worldToObjectLinear = Multiply(inverseScale, Transpose(rotation));
-        const Vec3 worldToObjectTranslation = TransformDirection(worldToObjectLinear, m_config.sphere.position * -1.0f);
-
         SceneData sceneData{};
-        sceneData.worldToObjectRow0[0] = worldToObjectLinear.m[0][0];
-        sceneData.worldToObjectRow0[1] = worldToObjectLinear.m[0][1];
-        sceneData.worldToObjectRow0[2] = worldToObjectLinear.m[0][2];
-        sceneData.worldToObjectRow0[3] = worldToObjectTranslation.x;
-        sceneData.worldToObjectRow1[0] = worldToObjectLinear.m[1][0];
-        sceneData.worldToObjectRow1[1] = worldToObjectLinear.m[1][1];
-        sceneData.worldToObjectRow1[2] = worldToObjectLinear.m[1][2];
-        sceneData.worldToObjectRow1[3] = worldToObjectTranslation.y;
-        sceneData.worldToObjectRow2[0] = worldToObjectLinear.m[2][0];
-        sceneData.worldToObjectRow2[1] = worldToObjectLinear.m[2][1];
-        sceneData.worldToObjectRow2[2] = worldToObjectLinear.m[2][2];
-        sceneData.worldToObjectRow2[3] = worldToObjectTranslation.z;
-        sceneData.materialAlbedoRoughness[0] = m_config.sphere.material.albedo[0];
-        sceneData.materialAlbedoRoughness[1] = m_config.sphere.material.albedo[1];
-        sceneData.materialAlbedoRoughness[2] = m_config.sphere.material.albedo[2];
-        sceneData.materialAlbedoRoughness[3] = m_config.sphere.material.roughness;
-        sceneData.materialEmission[0] = m_config.sphere.material.emission[0];
-        sceneData.materialEmission[1] = m_config.sphere.material.emission[1];
-        sceneData.materialEmission[2] = m_config.sphere.material.emission[2];
-        sceneData.materialEta[0] = m_config.sphere.material.eta[0];
-        sceneData.materialEta[1] = m_config.sphere.material.eta[1];
-        sceneData.materialEta[2] = m_config.sphere.material.eta[2];
-        sceneData.materialExtinction[0] = m_config.sphere.material.extinction[0];
-        sceneData.materialExtinction[1] = m_config.sphere.material.extinction[1];
-        sceneData.materialExtinction[2] = m_config.sphere.material.extinction[2];
         sceneData.skyBetaRayleighBetaM[0] = m_config.skySpectral.betaRayleigh[0];
         sceneData.skyBetaRayleighBetaM[1] = m_config.skySpectral.betaRayleigh[1];
         sceneData.skyBetaRayleighBetaM[2] = m_config.skySpectral.betaRayleigh[2];
@@ -399,36 +421,126 @@ private:
         return sceneData;
     }
 
-    VkAccelerationStructureInstanceKHR BuildSphereInstance() const
+    InstanceData BuildInstanceData(const ModelInstanceConfig& instanceConfig, const ModelGeometryRange& geometry) const
     {
-        const Mat3 rotation = MakeEulerRotationMatrixDegrees(m_config.sphere.rotationDegrees);
-        const Mat3 objectToWorldLinear = Multiply(rotation, MakeScaleMatrix(m_config.sphere.scale));
+        InstanceData instanceData{};
+        instanceData.materialIndexFirstIndex[0] = instanceConfig.materialIndex;
+        instanceData.materialIndexFirstIndex[1] = geometry.firstIndex;
+        return instanceData;
+    }
 
-        VkAccelerationStructureInstanceKHR instance{};
-        instance.transform.matrix[0][0] = objectToWorldLinear.m[0][0];
-        instance.transform.matrix[0][1] = objectToWorldLinear.m[0][1];
-        instance.transform.matrix[0][2] = objectToWorldLinear.m[0][2];
-        instance.transform.matrix[0][3] = m_config.sphere.position.x;
-        instance.transform.matrix[1][0] = objectToWorldLinear.m[1][0];
-        instance.transform.matrix[1][1] = objectToWorldLinear.m[1][1];
-        instance.transform.matrix[1][2] = objectToWorldLinear.m[1][2];
-        instance.transform.matrix[1][3] = m_config.sphere.position.y;
-        instance.transform.matrix[2][0] = objectToWorldLinear.m[2][0];
-        instance.transform.matrix[2][1] = objectToWorldLinear.m[2][1];
-        instance.transform.matrix[2][2] = objectToWorldLinear.m[2][2];
-        instance.transform.matrix[2][3] = m_config.sphere.position.z;
-        instance.instanceCustomIndex = 0;
-        instance.mask = 0xFF;
-        instance.instanceShaderBindingTableRecordOffset = 0;
-        instance.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
-        instance.accelerationStructureReference = GetAccelerationStructureDeviceAddress(m_blas.handle);
-        return instance;
+    MaterialData BuildMaterialData(const MaterialConfig& materialConfig) const
+    {
+        MaterialData materialData{};
+        materialData.albedoRoughness[0] = materialConfig.albedo[0];
+        materialData.albedoRoughness[1] = materialConfig.albedo[1];
+        materialData.albedoRoughness[2] = materialConfig.albedo[2];
+        materialData.albedoRoughness[3] = materialConfig.roughness;
+        materialData.emission[0] = materialConfig.emission[0];
+        materialData.emission[1] = materialConfig.emission[1];
+        materialData.emission[2] = materialConfig.emission[2];
+        materialData.eta[0] = materialConfig.eta[0];
+        materialData.eta[1] = materialConfig.eta[1];
+        materialData.eta[2] = materialConfig.eta[2];
+        materialData.extinction[0] = materialConfig.extinction[0];
+        materialData.extinction[1] = materialConfig.extinction[1];
+        materialData.extinction[2] = materialConfig.extinction[2];
+        return materialData;
+    }
+
+    std::vector<InstanceData> BuildInstanceDataArray() const
+    {
+        std::vector<InstanceData> instanceData;
+        instanceData.reserve(m_config.instances.size());
+        for (const ModelInstanceConfig& instanceConfig : m_config.instances)
+        {
+            instanceData.push_back(
+                BuildInstanceData(instanceConfig, m_modelAccelerationStructures[instanceConfig.modelIndex].geometry));
+        }
+        return instanceData;
+    }
+
+    std::vector<MaterialData> BuildMaterialDataArray() const
+    {
+        std::vector<MaterialData> materialData;
+        materialData.reserve(m_config.materials.size());
+        for (const MaterialConfig& materialConfig : m_config.materials)
+        {
+            materialData.push_back(BuildMaterialData(materialConfig));
+        }
+        return materialData;
+    }
+
+    std::vector<VkAccelerationStructureInstanceKHR> BuildSceneInstances() const
+    {
+        std::vector<VkAccelerationStructureInstanceKHR> instances;
+        instances.reserve(m_config.instances.size());
+
+        for (size_t instanceIndex = 0; instanceIndex < m_config.instances.size(); ++instanceIndex)
+        {
+            const ModelInstanceConfig& instanceConfig = m_config.instances[instanceIndex];
+            const Mat3 rotation = MakeEulerRotationMatrixDegrees(instanceConfig.rotationDegrees);
+            const Mat3 objectToWorldLinear = Multiply(rotation, MakeScaleMatrix(instanceConfig.scale));
+
+            VkAccelerationStructureInstanceKHR instance{};
+            instance.transform.matrix[0][0] = objectToWorldLinear.m[0][0];
+            instance.transform.matrix[0][1] = objectToWorldLinear.m[0][1];
+            instance.transform.matrix[0][2] = objectToWorldLinear.m[0][2];
+            instance.transform.matrix[0][3] = instanceConfig.position.x;
+            instance.transform.matrix[1][0] = objectToWorldLinear.m[1][0];
+            instance.transform.matrix[1][1] = objectToWorldLinear.m[1][1];
+            instance.transform.matrix[1][2] = objectToWorldLinear.m[1][2];
+            instance.transform.matrix[1][3] = instanceConfig.position.y;
+            instance.transform.matrix[2][0] = objectToWorldLinear.m[2][0];
+            instance.transform.matrix[2][1] = objectToWorldLinear.m[2][1];
+            instance.transform.matrix[2][2] = objectToWorldLinear.m[2][2];
+            instance.transform.matrix[2][3] = instanceConfig.position.z;
+            instance.instanceCustomIndex = static_cast<uint32_t>(instanceIndex);
+            instance.mask = 0xFF;
+            instance.instanceShaderBindingTableRecordOffset = 0;
+            instance.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
+            instance.accelerationStructureReference =
+                GetAccelerationStructureDeviceAddress(m_modelAccelerationStructures[instanceConfig.modelIndex].blas.handle);
+            instances.push_back(instance);
+        }
+
+        return instances;
+    }
+
+    void CreateSceneBuffers()
+    {
+        m_sceneDataBuffer = CreateBuffer(sizeof(SceneData),
+                                         VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+                                         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                                         false);
+        m_instanceDataBuffer = CreateBuffer(static_cast<VkDeviceSize>(m_config.instances.size() * sizeof(InstanceData)),
+                                            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                                            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                                            false);
+        m_materialDataBuffer =
+            CreateBuffer(static_cast<VkDeviceSize>(m_config.materials.size() * sizeof(MaterialData)),
+                         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                         false);
+    }
+
+    void DestroySceneBuffers()
+    {
+        DestroyBuffer(m_sceneDataBuffer);
+        DestroyBuffer(m_instanceDataBuffer);
+        DestroyBuffer(m_materialDataBuffer);
     }
 
     void UploadSceneDataFromConfig()
     {
         const SceneData sceneData = BuildSceneData();
         UploadToBuffer(m_sceneDataBuffer, &sceneData, sizeof(sceneData));
+
+        const std::vector<InstanceData> instanceData = BuildInstanceDataArray();
+        UploadToBuffer(m_instanceDataBuffer, instanceData.data(), instanceData.size() * sizeof(InstanceData));
+
+        const std::vector<MaterialData> materialData = BuildMaterialDataArray();
+        UploadToBuffer(m_materialDataBuffer, materialData.data(), materialData.size() * sizeof(MaterialData));
     }
 
     void UpdateDescriptorSetContents()
@@ -478,8 +590,202 @@ private:
             sceneWrite.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
             sceneWrite.pBufferInfo = &sceneDataInfo;
 
-            const std::array<VkWriteDescriptorSet, 3> writes = {write, accelerationWrite, sceneWrite};
+            VkDescriptorBufferInfo instanceDataInfo{};
+            instanceDataInfo.buffer = m_instanceDataBuffer.buffer;
+            instanceDataInfo.offset = 0;
+            instanceDataInfo.range = m_instanceDataBuffer.size;
+
+            VkWriteDescriptorSet instanceWrite{};
+            instanceWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            instanceWrite.dstSet = m_descriptorSets[i];
+            instanceWrite.dstBinding = 3;
+            instanceWrite.descriptorCount = 1;
+            instanceWrite.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            instanceWrite.pBufferInfo = &instanceDataInfo;
+
+            VkDescriptorBufferInfo materialDataInfo{};
+            materialDataInfo.buffer = m_materialDataBuffer.buffer;
+            materialDataInfo.offset = 0;
+            materialDataInfo.range = m_materialDataBuffer.size;
+
+            VkWriteDescriptorSet materialWrite{};
+            materialWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            materialWrite.dstSet = m_descriptorSets[i];
+            materialWrite.dstBinding = 4;
+            materialWrite.descriptorCount = 1;
+            materialWrite.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            materialWrite.pBufferInfo = &materialDataInfo;
+
+            VkDescriptorBufferInfo vertexDataInfo{};
+            vertexDataInfo.buffer = m_vertexBuffer.buffer;
+            vertexDataInfo.offset = 0;
+            vertexDataInfo.range = m_vertexBuffer.size;
+
+            VkWriteDescriptorSet vertexWrite{};
+            vertexWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            vertexWrite.dstSet = m_descriptorSets[i];
+            vertexWrite.dstBinding = 5;
+            vertexWrite.descriptorCount = 1;
+            vertexWrite.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            vertexWrite.pBufferInfo = &vertexDataInfo;
+
+            VkDescriptorBufferInfo indexDataInfo{};
+            indexDataInfo.buffer = m_indexBuffer.buffer;
+            indexDataInfo.offset = 0;
+            indexDataInfo.range = m_indexBuffer.size;
+
+            VkWriteDescriptorSet indexWrite{};
+            indexWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            indexWrite.dstSet = m_descriptorSets[i];
+            indexWrite.dstBinding = 6;
+            indexWrite.descriptorCount = 1;
+            indexWrite.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            indexWrite.pBufferInfo = &indexDataInfo;
+
+            const std::array<VkWriteDescriptorSet, 7> writes = {
+                write,
+                accelerationWrite,
+                sceneWrite,
+                instanceWrite,
+                materialWrite,
+                vertexWrite,
+                indexWrite,
+            };
             vkUpdateDescriptorSets(m_device, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
+        }
+    }
+
+    void DestroyGeometryResources()
+    {
+        if (m_tlas.handle != VK_NULL_HANDLE)
+        {
+            m_vkDestroyAccelerationStructureKHR(m_device, m_tlas.handle, nullptr);
+            m_tlas.handle = VK_NULL_HANDLE;
+        }
+        DestroyBuffer(m_tlas.buffer);
+        DestroyBuffer(m_instanceBuffer);
+
+        for (auto& model : m_modelAccelerationStructures)
+        {
+            if (model.blas.handle != VK_NULL_HANDLE)
+            {
+                m_vkDestroyAccelerationStructureKHR(m_device, model.blas.handle, nullptr);
+                model.blas.handle = VK_NULL_HANDLE;
+            }
+            DestroyBuffer(model.blas.buffer);
+        }
+        m_modelAccelerationStructures.clear();
+        DestroyBuffer(m_indexBuffer);
+        DestroyBuffer(m_vertexBuffer);
+    }
+
+    void CreateGeometryResourcesFromConfig()
+    {
+        std::vector<ModelVertex> vertices;
+        std::vector<uint32_t> indices;
+        std::vector<ModelGeometryRange> geometryRanges;
+        geometryRanges.reserve(m_config.models.size());
+
+        for (const ModelAssetConfig& modelConfig : m_config.models)
+        {
+            const std::filesystem::path modelPath = ResolveModelFilePath(modelConfig.fileName);
+            if (modelPath.empty())
+            {
+                throw std::runtime_error("Failed to locate OBJ model: " + modelConfig.fileName);
+            }
+
+            const ObjModel loadedModel = LoadObjModel(modelPath);
+            ModelGeometryRange geometry{};
+            geometry.firstVertex = static_cast<uint32_t>(vertices.size());
+            geometry.vertexCount = static_cast<uint32_t>(loadedModel.vertices.size());
+            geometry.firstIndex = static_cast<uint32_t>(indices.size());
+            geometry.indexCount = static_cast<uint32_t>(loadedModel.indices.size());
+
+            vertices.insert(vertices.end(), loadedModel.vertices.begin(), loadedModel.vertices.end());
+            for (uint32_t index : loadedModel.indices)
+            {
+                indices.push_back(index + geometry.firstVertex);
+            }
+
+            geometryRanges.push_back(geometry);
+        }
+
+        m_vertexBuffer = CreateBuffer(static_cast<VkDeviceSize>(vertices.size() * sizeof(ModelVertex)),
+                                      VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR
+                                          | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                                      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                                      true);
+        m_indexBuffer = CreateBuffer(static_cast<VkDeviceSize>(indices.size() * sizeof(uint32_t)),
+                                     VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR
+                                         | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                                     VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                                     true);
+        UploadToBuffer(m_vertexBuffer, vertices.data(), vertices.size() * sizeof(ModelVertex));
+        UploadToBuffer(m_indexBuffer, indices.data(), indices.size() * sizeof(uint32_t));
+
+        const VkDeviceAddress vertexAddress = GetBufferDeviceAddress(m_vertexBuffer.buffer);
+        const VkDeviceAddress indexAddress = GetBufferDeviceAddress(m_indexBuffer.buffer);
+
+        m_modelAccelerationStructures.clear();
+        m_modelAccelerationStructures.reserve(geometryRanges.size());
+        for (const ModelGeometryRange& geometry : geometryRanges)
+        {
+            VkAccelerationStructureGeometryTrianglesDataKHR triangles{};
+            triangles.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR;
+            triangles.vertexFormat = VK_FORMAT_R32G32B32_SFLOAT;
+            triangles.vertexData.deviceAddress = vertexAddress;
+            triangles.vertexStride = sizeof(ModelVertex);
+            triangles.maxVertex = geometry.firstVertex + geometry.vertexCount - 1;
+            triangles.indexType = VK_INDEX_TYPE_UINT32;
+            triangles.indexData.deviceAddress =
+                indexAddress + static_cast<VkDeviceSize>(geometry.firstIndex) * sizeof(uint32_t);
+
+            VkAccelerationStructureGeometryKHR blasGeometry{};
+            blasGeometry.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
+            blasGeometry.geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR;
+            blasGeometry.flags = VK_GEOMETRY_OPAQUE_BIT_KHR;
+            blasGeometry.geometry.triangles = triangles;
+
+            VkAccelerationStructureBuildGeometryInfoKHR blasBuildInfo{};
+            blasBuildInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR;
+            blasBuildInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
+            blasBuildInfo.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
+            blasBuildInfo.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
+            blasBuildInfo.geometryCount = 1;
+            blasBuildInfo.pGeometries = &blasGeometry;
+
+            uint32_t blasPrimitiveCount = geometry.indexCount / 3;
+            VkAccelerationStructureBuildSizesInfoKHR blasSizeInfo{};
+            blasSizeInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR;
+            m_vkGetAccelerationStructureBuildSizesKHR(m_device,
+                                                      VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
+                                                      &blasBuildInfo,
+                                                      &blasPrimitiveCount,
+                                                      &blasSizeInfo);
+
+            ModelAccelerationStructure modelResources{};
+            modelResources.geometry = geometry;
+            modelResources.blas = CreateAccelerationStructure(VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR,
+                                                              blasSizeInfo.accelerationStructureSize);
+            blasBuildInfo.dstAccelerationStructure = modelResources.blas.handle;
+
+            BufferAllocation blasScratch = CreateBuffer(blasSizeInfo.buildScratchSize,
+                                                        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+                                                            | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+                                                        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                                                        true);
+            blasBuildInfo.scratchData.deviceAddress = GetBufferDeviceAddress(blasScratch.buffer);
+
+            VkAccelerationStructureBuildRangeInfoKHR blasRangeInfo{};
+            blasRangeInfo.primitiveCount = blasPrimitiveCount;
+            const VkAccelerationStructureBuildRangeInfoKHR* blasRangeInfos[] = {&blasRangeInfo};
+
+            VkCommandBuffer blasCommandBuffer = BeginSingleTimeCommands();
+            m_vkCmdBuildAccelerationStructuresKHR(blasCommandBuffer, 1, &blasBuildInfo, blasRangeInfos);
+            EndSingleTimeCommands(blasCommandBuffer);
+            DestroyBuffer(blasScratch);
+
+            m_modelAccelerationStructures.push_back(modelResources);
         }
     }
 
@@ -493,13 +799,15 @@ private:
         DestroyBuffer(m_tlas.buffer);
         DestroyBuffer(m_instanceBuffer);
 
-        const VkAccelerationStructureInstanceKHR instance = BuildSphereInstance();
-        m_instanceBuffer = CreateBuffer(sizeof(instance),
+        const std::vector<VkAccelerationStructureInstanceKHR> instances = BuildSceneInstances();
+        m_instanceBuffer = CreateBuffer(static_cast<VkDeviceSize>(instances.size() * sizeof(VkAccelerationStructureInstanceKHR)),
                                         VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR
                                             | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
                                         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
                                         true);
-        UploadToBuffer(m_instanceBuffer, &instance, sizeof(instance));
+        UploadToBuffer(m_instanceBuffer,
+                       instances.data(),
+                       instances.size() * sizeof(VkAccelerationStructureInstanceKHR));
 
         VkAccelerationStructureGeometryInstancesDataKHR instancesData{};
         instancesData.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR;
@@ -518,7 +826,7 @@ private:
         tlasBuildInfo.geometryCount = 1;
         tlasBuildInfo.pGeometries = &tlasGeometry;
 
-        uint32_t tlasPrimitiveCount = 1;
+        uint32_t tlasPrimitiveCount = static_cast<uint32_t>(instances.size());
         VkAccelerationStructureBuildSizesInfoKHR tlasSizeInfo{};
         tlasSizeInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR;
         m_vkGetAccelerationStructureBuildSizesKHR(m_device,
@@ -548,7 +856,9 @@ private:
         DestroyBuffer(tlasScratch);
     }
 
-    void RefreshSceneFromConfig(bool transformChanged)
+    void RefreshSceneFromConfig(bool rebuildGeometryResources,
+                                bool rebuildTopLevelAccelerationStructure,
+                                bool recreateSceneBuffers)
     {
         if (m_sceneDataBuffer.buffer == VK_NULL_HANDLE)
         {
@@ -556,19 +866,38 @@ private:
         }
 
         ThrowVk(vkDeviceWaitIdle(m_device), "Failed to wait for device idle during scene reload");
+        if (rebuildGeometryResources)
+        {
+            DestroyGeometryResources();
+            CreateGeometryResourcesFromConfig();
+        }
+        if (recreateSceneBuffers)
+        {
+            DestroySceneBuffers();
+            CreateSceneBuffers();
+        }
         UploadSceneDataFromConfig();
-        if (transformChanged)
+
+        bool descriptorSetsNeedUpdate = recreateSceneBuffers || rebuildGeometryResources;
+        if (rebuildTopLevelAccelerationStructure)
         {
             RebuildTopLevelAccelerationStructure();
+            descriptorSetsNeedUpdate = true;
+        }
+        if (descriptorSetsNeedUpdate)
+        {
             UpdateDescriptorSetContents();
         }
     }
 
     void ApplyRuntimeConfig(const RuntimeConfig& config, bool resetCameraState)
     {
-        const bool sphereTransformChanged = HasSphereTransformChanged(config, m_config);
-        const bool sphereMaterialChanged = HasSphereMaterialChanged(config, m_config);
-        const bool sphereMeshResolutionChanged = HasSphereMeshResolutionChanged(config, m_config);
+        const bool modelDefinitionsChanged = HasModelDefinitionsChanged(config, m_config);
+        const bool instanceTransformChanged = HasInstanceTransformChanged(config, m_config);
+        const bool instanceBindingChanged = HasInstanceBindingChanged(config, m_config);
+        const bool materialDataChanged = HasMaterialDataChanged(config, m_config);
+        const bool sceneBufferLayoutChanged =
+            config.instances.size() != m_config.instances.size() || config.materials.size() != m_config.materials.size();
         const bool skySpectralChanged = HasSkySpectralChanged(config.skySpectral, m_config.skySpectral);
         if (m_physicalDevice != VK_NULL_HANDLE
             && config.maxBounces > m_rayTracingPipelineProperties.maxRayRecursionDepth)
@@ -579,9 +908,9 @@ private:
         if (!m_configPath.empty() && !resetCameraState)
         {
             if (config.width != m_config.width || config.height != m_config.height
-                || config.frameCount != m_config.frameCount || sphereMeshResolutionChanged)
+                || config.frameCount != m_config.frameCount)
             {
-                std::puts("[Config] width/height/frameCount/sphere mesh resolution changes apply on the next launch.");
+                std::puts("[Config] width/height/frameCount changes apply on the next launch.");
             }
         }
 
@@ -595,13 +924,12 @@ private:
         const float maxPitch = GetCameraMaxPitchRadians();
         m_cameraPitch = std::clamp(m_cameraPitch, -maxPitch, maxPitch);
 
-        if (!resetCameraState && (sphereTransformChanged || sphereMaterialChanged))
+        if (modelDefinitionsChanged || instanceTransformChanged || instanceBindingChanged || materialDataChanged
+            || skySpectralChanged)
         {
-            RefreshSceneFromConfig(sphereTransformChanged);
-        }
-        else if (!resetCameraState && skySpectralChanged)
-        {
-            RefreshSceneFromConfig(false);
+            RefreshSceneFromConfig(modelDefinitionsChanged,
+                                   modelDefinitionsChanged || instanceTransformChanged || instanceBindingChanged,
+                                   sceneBufferLayoutChanged);
         }
     }
 
@@ -1316,86 +1644,9 @@ private:
             throw std::runtime_error("Command pool must be created before ray tracing scene setup.");
         }
 
-        const SphereMesh sphereMesh = CreateSphereMesh({0.0f, 0.0f, 0.0f},
-                                                       1.0f,
-                                                       m_config.sphere.longitudeSegments,
-                                                       m_config.sphere.latitudeSegments);
-
-        m_vertexBuffer = CreateBuffer(static_cast<VkDeviceSize>(sphereMesh.vertices.size() * sizeof(float)),
-                                      VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR
-                                          | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-                                      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                                      true);
-        m_indexBuffer = CreateBuffer(static_cast<VkDeviceSize>(sphereMesh.indices.size() * sizeof(uint32_t)),
-                                     VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR
-                                         | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-                                     VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                                     true);
-        UploadToBuffer(m_vertexBuffer,
-                       sphereMesh.vertices.data(),
-                       sphereMesh.vertices.size() * sizeof(float));
-        UploadToBuffer(m_indexBuffer,
-                       sphereMesh.indices.data(),
-                       sphereMesh.indices.size() * sizeof(uint32_t));
-
-        m_sceneDataBuffer = CreateBuffer(sizeof(SceneData),
-                                         VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
-                                         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                                         false);
+        CreateGeometryResourcesFromConfig();
+        CreateSceneBuffers();
         UploadSceneDataFromConfig();
-
-        VkAccelerationStructureGeometryTrianglesDataKHR triangles{};
-        triangles.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR;
-        triangles.vertexFormat = VK_FORMAT_R32G32B32_SFLOAT;
-        triangles.vertexData.deviceAddress = GetBufferDeviceAddress(m_vertexBuffer.buffer);
-        triangles.vertexStride = sizeof(float) * 3;
-        triangles.maxVertex = static_cast<uint32_t>(sphereMesh.vertices.size() / 3 - 1);
-        triangles.indexType = VK_INDEX_TYPE_UINT32;
-        triangles.indexData.deviceAddress = GetBufferDeviceAddress(m_indexBuffer.buffer);
-
-        VkAccelerationStructureGeometryKHR blasGeometry{};
-        blasGeometry.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
-        blasGeometry.geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR;
-        blasGeometry.flags = VK_GEOMETRY_OPAQUE_BIT_KHR;
-        blasGeometry.geometry.triangles = triangles;
-
-        VkAccelerationStructureBuildGeometryInfoKHR blasBuildInfo{};
-        blasBuildInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR;
-        blasBuildInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
-        blasBuildInfo.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
-        blasBuildInfo.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
-        blasBuildInfo.geometryCount = 1;
-        blasBuildInfo.pGeometries = &blasGeometry;
-
-        uint32_t blasPrimitiveCount = static_cast<uint32_t>(sphereMesh.indices.size() / 3);
-        VkAccelerationStructureBuildSizesInfoKHR blasSizeInfo{};
-        blasSizeInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR;
-        m_vkGetAccelerationStructureBuildSizesKHR(m_device,
-                                                  VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
-                                                  &blasBuildInfo,
-                                                  &blasPrimitiveCount,
-                                                  &blasSizeInfo);
-
-        m_blas = CreateAccelerationStructure(VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR,
-                                             blasSizeInfo.accelerationStructureSize);
-        blasBuildInfo.dstAccelerationStructure = m_blas.handle;
-
-        BufferAllocation blasScratch = CreateBuffer(blasSizeInfo.buildScratchSize,
-                                                    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
-                                                        | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-                                                    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-                                                    true);
-        blasBuildInfo.scratchData.deviceAddress = GetBufferDeviceAddress(blasScratch.buffer);
-
-        VkAccelerationStructureBuildRangeInfoKHR blasRangeInfo{};
-        blasRangeInfo.primitiveCount = blasPrimitiveCount;
-        const VkAccelerationStructureBuildRangeInfoKHR* blasRangeInfos[] = {&blasRangeInfo};
-
-        VkCommandBuffer blasCommandBuffer = BeginSingleTimeCommands();
-        m_vkCmdBuildAccelerationStructuresKHR(blasCommandBuffer, 1, &blasBuildInfo, blasRangeInfos);
-        EndSingleTimeCommands(blasCommandBuffer);
-        DestroyBuffer(blasScratch);
-
         RebuildTopLevelAccelerationStructure();
     }
 
@@ -1529,10 +1780,38 @@ private:
         sceneBinding.descriptorCount = 1;
         sceneBinding.stageFlags = VK_SHADER_STAGE_MISS_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
 
-        const std::array<VkDescriptorSetLayoutBinding, 3> bindings = {
+        VkDescriptorSetLayoutBinding instanceBinding{};
+        instanceBinding.binding = 3;
+        instanceBinding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        instanceBinding.descriptorCount = 1;
+        instanceBinding.stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
+
+        VkDescriptorSetLayoutBinding materialBinding{};
+        materialBinding.binding = 4;
+        materialBinding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        materialBinding.descriptorCount = 1;
+        materialBinding.stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
+
+        VkDescriptorSetLayoutBinding vertexBinding{};
+        vertexBinding.binding = 5;
+        vertexBinding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        vertexBinding.descriptorCount = 1;
+        vertexBinding.stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
+
+        VkDescriptorSetLayoutBinding indexBinding{};
+        indexBinding.binding = 6;
+        indexBinding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        indexBinding.descriptorCount = 1;
+        indexBinding.stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
+
+        const std::array<VkDescriptorSetLayoutBinding, 7> bindings = {
             binding,
             accelerationBinding,
             sceneBinding,
+            instanceBinding,
+            materialBinding,
+            vertexBinding,
+            indexBinding,
         };
 
         VkDescriptorSetLayoutCreateInfo createInfo{};
@@ -1732,7 +2011,15 @@ private:
         VkDescriptorPoolSize scenePoolSize{};
         scenePoolSize.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
         scenePoolSize.descriptorCount = static_cast<uint32_t>(m_swapchainImageViews.size());
-        const std::array<VkDescriptorPoolSize, 3> poolSizes = {poolSize, accelerationPoolSize, scenePoolSize};
+        VkDescriptorPoolSize storageBufferPoolSize{};
+        storageBufferPoolSize.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        storageBufferPoolSize.descriptorCount = static_cast<uint32_t>(m_swapchainImageViews.size() * 4);
+        const std::array<VkDescriptorPoolSize, 4> poolSizes = {
+            poolSize,
+            accelerationPoolSize,
+            scenePoolSize,
+            storageBufferPoolSize,
+        };
 
         VkDescriptorPoolCreateInfo poolInfo{};
         poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
@@ -2045,22 +2332,8 @@ private:
         if (m_rayTracingPipeline != VK_NULL_HANDLE) vkDestroyPipeline(m_device, m_rayTracingPipeline, nullptr);
         if (m_pipelineLayout != VK_NULL_HANDLE) vkDestroyPipelineLayout(m_device, m_pipelineLayout, nullptr);
         if (m_descriptorSetLayout != VK_NULL_HANDLE) vkDestroyDescriptorSetLayout(m_device, m_descriptorSetLayout, nullptr);
-        if (m_tlas.handle != VK_NULL_HANDLE)
-        {
-            m_vkDestroyAccelerationStructureKHR(m_device, m_tlas.handle, nullptr);
-            m_tlas.handle = VK_NULL_HANDLE;
-        }
-        if (m_blas.handle != VK_NULL_HANDLE)
-        {
-            m_vkDestroyAccelerationStructureKHR(m_device, m_blas.handle, nullptr);
-            m_blas.handle = VK_NULL_HANDLE;
-        }
-        DestroyBuffer(m_tlas.buffer);
-        DestroyBuffer(m_blas.buffer);
-        DestroyBuffer(m_instanceBuffer);
-        DestroyBuffer(m_indexBuffer);
-        DestroyBuffer(m_vertexBuffer);
-        DestroyBuffer(m_sceneDataBuffer);
+        DestroyGeometryResources();
+        DestroySceneBuffers();
         DestroyBuffer(m_raygenShaderBindingTable);
         DestroyBuffer(m_missShaderBindingTable);
         DestroyBuffer(m_hitShaderBindingTable);
@@ -2109,10 +2382,12 @@ private:
     BufferAllocation m_indexBuffer{};
     BufferAllocation m_instanceBuffer{};
     BufferAllocation m_sceneDataBuffer{};
+    BufferAllocation m_instanceDataBuffer{};
+    BufferAllocation m_materialDataBuffer{};
     BufferAllocation m_raygenShaderBindingTable{};
     BufferAllocation m_missShaderBindingTable{};
     BufferAllocation m_hitShaderBindingTable{};
-    AccelerationStructureAllocation m_blas{};
+    std::vector<ModelAccelerationStructure> m_modelAccelerationStructures;
     AccelerationStructureAllocation m_tlas{};
     VkStridedDeviceAddressRegionKHR m_raygenShaderBindingTableRegion{};
     VkStridedDeviceAddressRegionKHR m_missShaderBindingTableRegion{};

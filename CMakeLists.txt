@@ -57,8 +57,8 @@ add_custom_target(vulkan_shader ALL DEPENDS ${SHADER_SPV_OUTPUTS})
 
 add_executable(Vulkanic
         main.cpp
+        ObjModel.cpp
         RuntimeConfig.cpp
-        SphereMesh.cpp
         VulkanPathTracer.cpp)
 add_dependencies(Vulkanic vulkan_shader)
 target_link_libraries(Vulkanic PRIVATE Vulkan::Vulkan)

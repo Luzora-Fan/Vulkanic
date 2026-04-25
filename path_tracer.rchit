@@ -9,7 +9,8 @@ hitAttributeEXT vec2 hitAttributes;
 
 void main()
 {
-    Material material = GetSphereMaterial();
+    InstanceData instanceData = instanceBuffer.instances[gl_InstanceCustomIndexEXT];
+    Material material = GetInstanceMaterial(instanceData);
     payload.radiance.xyz += payload.throughput.xyz * material.emission;
     if (MaxComponent(material.emission) > 0.0)
     {
@@ -23,15 +24,23 @@ void main()
     }
 
     vec3 hitPosition = gl_WorldRayOriginEXT + gl_WorldRayDirectionEXT * gl_HitTEXT;
-    vec3 objectPosition = TransformPointToObject(hitPosition);
-    vec3 normal = TransformNormalToWorld(normalize(objectPosition));
+    mat3 worldToObjectLinear =
+        mat3(gl_WorldToObjectEXT[0].xyz, gl_WorldToObjectEXT[1].xyz, gl_WorldToObjectEXT[2].xyz);
+    vec3 objectNormal = GetTriangleObjectNormal(instanceData, gl_PrimitiveID, hitAttributes);
+    vec3 normal = TransformNormalToWorld(objectNormal, worldToObjectLinear);
     if (dot(normal, gl_WorldRayDirectionEXT) > 0.0)
     {
         normal = -normal;
     }
 
     float cosTheta = clamp(dot(normal, -gl_WorldRayDirectionEXT), 0.0, 1.0);
-    payload.throughput.xyz *= material.albedo * FresnelReflectance(cosTheta, material.eta, material.extinction);
+    vec3 reflectance = FresnelReflectance(cosTheta, material.eta, material.extinction);
+    if(material.roughness == 1.0)
+    {
+        reflectance = vec3(cosTheta);
+    }
+
+    payload.throughput.xyz *= material.albedo * reflectance;
     if (MaxComponent(payload.throughput.xyz) < 1.0e-6)
     {
         return;
