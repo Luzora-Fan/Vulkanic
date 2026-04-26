@@ -498,7 +498,7 @@ private:
             instance.instanceCustomIndex = static_cast<uint32_t>(instanceIndex);
             instance.mask = 0xFF;
             instance.instanceShaderBindingTableRecordOffset = 0;
-            instance.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
+            instance.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FRONT_COUNTERCLOCKWISE_BIT_KHR;
             instance.accelerationStructureReference =
                 GetAccelerationStructureDeviceAddress(m_modelAccelerationStructures[instanceConfig.modelIndex].blas.handle);
             instances.push_back(instance);
