@@ -3,7 +3,7 @@
     "width": 960,
     "height": 540,
     "frameCount": 2,
-    "samplesPerPixel": 9,
+    "samplesPerPixel": 32,
     "maxBounces": 3
   },
   "camera": {

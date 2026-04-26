@@ -1288,6 +1288,7 @@ private:
         bool hasRayTracingPipeline = false;
         bool hasDeferredHostOperations = false;
         bool hasBufferDeviceAddress = false;
+        bool hasShaderNonSemanticInfo = false;
         for (const auto& extension : extensions)
         {
             if (std::strcmp(extension.extensionName, VK_KHR_SWAPCHAIN_EXTENSION_NAME) == 0)
@@ -1310,14 +1311,18 @@ private:
             {
                 hasBufferDeviceAddress = true;
             }
+            if (std::strcmp(extension.extensionName, VK_KHR_SHADER_NON_SEMANTIC_INFO_EXTENSION_NAME) == 0)
+            {
+                hasShaderNonSemanticInfo = true;
+            }
             if (hasSwapchain && hasAccelerationStructure && hasRayTracingPipeline && hasDeferredHostOperations
-                && hasBufferDeviceAddress)
+                && hasBufferDeviceAddress && hasShaderNonSemanticInfo)
             {
                 break;
             }
         }
         const bool hasRequiredExtensions = hasSwapchain && hasAccelerationStructure && hasRayTracingPipeline
-                                           && hasDeferredHostOperations && hasBufferDeviceAddress;
+                                           && hasDeferredHostOperations && hasBufferDeviceAddress && hasShaderNonSemanticInfo;
         if (!hasRequiredExtensions)
         {
             return false;
@@ -1418,12 +1423,13 @@ private:
             queueInfos.push_back(queueInfo);
         }
 
-        const std::array<const char*, 5> deviceExtensions = {
+        const std::array<const char*, 6> deviceExtensions = {
             VK_KHR_SWAPCHAIN_EXTENSION_NAME,
             VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME,
             VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME,
             VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME,
             VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME,
+            VK_KHR_SHADER_NON_SEMANTIC_INFO_EXTENSION_NAME
         };
 
         VkPhysicalDeviceFeatures2 deviceFeatures{};

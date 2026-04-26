@@ -45,7 +45,7 @@ foreach(SHADER_SOURCE IN LISTS RT_SHADER_SOURCES)
 
     add_custom_command(
             OUTPUT "${SHADER_OUTPUT}"
-            COMMAND "${GLSLC_EXECUTABLE}" --target-env=vulkan1.2 -I "${CMAKE_CURRENT_SOURCE_DIR}"
+            COMMAND "${GLSLC_EXECUTABLE}" --target-env=vulkan1.2 -g -O0 -I "${CMAKE_CURRENT_SOURCE_DIR}"
             -o "${SHADER_OUTPUT}" "${SHADER_INPUT}"
             DEPENDS "${SHADER_INPUT}" ${SHADER_SHARED_DEPENDENCIES}
             VERBATIM)
