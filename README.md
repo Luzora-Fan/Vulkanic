@@ -5,10 +5,12 @@ A lightweight, purely native C++17 Vulkan path tracer demonstrating hardware-acc
 ## Features
 
 - **Hardware-Accelerated Ray Tracing:** Implements `VK_KHR_ray_tracing_pipeline` for ray generation (`.rgen`), closest hit (`.rchit`), and miss (`.rmiss`) shaders.
+- **Advanced Material Rendering:** Includes support for multiscatter GGX energy compensation (Fdez-Aguera approximation) and Heitz 2018 anisotropic VNDF sampling.
 - **Zero Third-Party Wrapper Clutter:** Built directly on top of the Vulkan SDK and the native Win32 API. Does not rely on libraries like GLFW, GLM, or TinyObjLoader—it uses its own mathematical structures and OBJ parser.
 - **Compute Shader Environment:** Renders the sky and background environments dynamically utilizing Vulkan compute shaders (`sky.comp`).
 - **Dynamic Configuration:** Supports runtime configurations mapped from a lightweight `path_tracer_config.json` model.
 - **Native `.obj` Loading:** Parses and loads standard 3D `.obj` models internally.
+- **Shader Debugging Support:** Utilizes `VK_KHR_shader_non_semantic_info` extension and emits unoptimized shaders with debug symbols for easier troubleshooting.
 
 ## System Requirements
 
@@ -48,8 +50,13 @@ cmake --build .
   - `path_tracer.rmiss` - Ray miss shader.
   - `path_tracer.rchit` - Ray closest hit shader.
   - `sky.comp` - Environment compute shader.
+  - `path_tracer_common.glsl` - Shared shader utilities, mathematical constants, and payload structures.
 - **C++ Core:**
-  - `VulkanPathTracer` - Handles Vulkan setup, initialization, synchronization, ray-tracing pipelines, and the Win32 message loop.
-  - `ObjModel` - Dedicated internal `.obj` 3D mesh parser.
-  - `RuntimeConfig` - Parsing mapping for handling application specifications and attributes.
+  - `VulkanPathTracer.h` / `.cpp` - Handles Vulkan setup, initialization, synchronization, ray-tracing pipelines, and the Win32 message loop.
+  - `ObjModel.h` / `.cpp` - Dedicated internal `.obj` 3D mesh parser.
+  - `RuntimeConfig.h` / `.cpp` - Parsing mapping for handling application specifications and attributes from `path_tracer_config.json`.
   - `main.cpp` - Execution entrypoint.
+- **Build & Configuration:**
+  - `build.ps1` - PowerShell script mapping MSVC environments to build with `cmake`.
+  - `CMakeLists.txt` - CMake configuration linking native modules and compiling GLSL to SPIR-V.
+  - `path_tracer_config.json` - Defines materials, objects, sky spectral constants, camera properties, and render settings.
