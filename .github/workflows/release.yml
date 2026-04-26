@@ -15,19 +15,25 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build (your script)
+      - name: Install Vulkan SDK
+        shell: pwsh
+        run: choco install vulkan-sdk -y
+
+      - name: Set Vulkan env
+        shell: pwsh
+        run: |
+            $env:VULKAN_SDK = "C:\VulkanSDK\*\"
+            echo "VULKAN_SDK=$env:VULKAN_SDK"
+
+      - name: Build
         shell: pwsh
         run: powershell -ExecutionPolicy Bypass -File .\build.ps1 -Clean
 
       - name: Zip package
         shell: pwsh
-        run: |
-          Compress-Archive -Path .\package\* -DestinationPath Vulkanic-${{ github.ref_name }}-windows.zip
+        run: Compress-Archive -Path .\package\* -DestinationPath Vulkanic-${{ github.ref_name }}-windows.zip
 
-      - name: Create Release + Upload
+      - name: Create Release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh release create ${{ github.ref_name }} `
-            Vulkanic-${{ github.ref_name }}-windows.zip `
-            --generate-notes
+        run: gh release create ${{ github.ref_name }} Vulkanic-${{ github.ref_name }}-windows.zip --generate-notes
