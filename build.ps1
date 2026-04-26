@@ -51,19 +51,29 @@ if ($Clean -and (Test-Path $buildPath)) {
 Write-Host "Configuring and building in: $BuildDir"
 
 # 1. Start sccache server (it usually starts on its own, but this ensures it's ready)
+$useSccache = $false
 if (Get-Command sccache -ErrorAction SilentlyContinue) {
     Write-Host "sccache detected. Enabling compiler caching."
     sccache --start-server
+    $useSccache = $true
 } else {
-    Write-Warning "sccache not found in PATH. Ensure you restarted your terminal after winget install."
+    Write-Warning "sccache not found in PATH. Proceeding without compiler caching."
 }
 
-# 2. Configure with sccache launchers.
+# 2. Configure project
 # CMakeLists.txt already rewrites /Zi to /Z7 for MSVC builds so sccache can cache them.
-& cmake -S "$repoRoot" -B "$buildPath" -G Ninja `
-    "-DCMAKE_BUILD_TYPE=$Configuration" `
-    "-DCMAKE_C_COMPILER_LAUNCHER=sccache" `
-    "-DCMAKE_CXX_COMPILER_LAUNCHER=sccache"
+$cmakeArgs = @(
+    "-S", "$repoRoot",
+    "-B", "$buildPath",
+    "-G", "Ninja",
+    "-DCMAKE_BUILD_TYPE=$Configuration"
+)
+if ($useSccache) {
+    $cmakeArgs += "-DCMAKE_C_COMPILER_LAUNCHER=sccache"
+    $cmakeArgs += "-DCMAKE_CXX_COMPILER_LAUNCHER=sccache"
+}
+
+& cmake @cmakeArgs
 
 if ($LASTEXITCODE -ne 0) {
     throw "Configure failed."
@@ -77,8 +87,10 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 # 4. Show cache stats so you can see the hits
-Write-Host "`n--- sccache Statistics ---"
-sccache --show-stats
+if ($useSccache) {
+    Write-Host "`n--- sccache Statistics ---"
+    sccache --show-stats
+}
 
 Write-Host "`nBuild completed successfully."
 
