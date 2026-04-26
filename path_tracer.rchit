@@ -33,38 +33,79 @@ void main()
         normal = -normal;
     }
 
-    float cosTheta = clamp(dot(normal, -gl_WorldRayDirectionEXT), 0.0, 1.0);
-    vec3 reflectance = FresnelReflectance(cosTheta, material.eta, material.extinction);
-    if(material.roughness == 1.0)
-    {
-        reflectance = vec3(cosTheta);
-    }
-
-    payload.throughput.xyz *= material.albedo * reflectance;
+    payload.throughput.xyz *= material.albedo;
     if (MaxComponent(payload.throughput.xyz) < 1.0e-6)
     {
         return;
     }
 
-    payload.state.y += 1u;
+    RNG rng;
+    rng.state = payload.state.x;
 
-    if (payload.state.y >= 2u)
+    if (payload.state.y >= 3u)
     {
-        uint rngState = payload.state.x;
         float surviveProbability = clamp(MaxComponent(payload.throughput.xyz), 0.05, 0.95);
-        if (NextFloat(rngState) > surviveProbability)
+        if (NextFloat(rng.state) > surviveProbability)
         {
-            payload.state.x = rngState;
+            payload.state.x = rng.state;
             return;
         }
         payload.throughput.xyz /= surviveProbability;
-        payload.state.x = rngState;
     }
 
-    RNG rng;
-    rng.state = payload.state.x;
-    vec3 reflectedDirection = reflect(gl_WorldRayDirectionEXT, normal);
-    vec3 reflectedSample = sample_cone(reflectedDirection, material.roughness * 0.5 * PI, rng);
+    payload.state.y += 1u;
+
+    vec3 V = -gl_WorldRayDirectionEXT;
+    vec3 helper = abs(normal.y) < 0.999 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+    vec3 tangent = normalize(cross(helper, normal));
+    vec3 bitangent = cross(normal, tangent);
+    
+    // Transform V to local space
+    vec3 V_local = normalize(vec3(dot(V, tangent), dot(V, bitangent), dot(V, normal)));
+
+    vec2 xi = vec2(NextFloat(rng.state), NextFloat(rng.state));
+    float a = material.roughness * material.roughness;
+
+    // Heitz 2018 VNDF sampling
+    vec3 Vh = normalize(vec3(a * V_local.x, a * V_local.y, V_local.z));
+    float lensq = Vh.x * Vh.x + Vh.y * Vh.y;
+    vec3 T1 = lensq > 0.0 ? vec3(-Vh.y, Vh.x, 0.0) * inversesqrt(lensq) : vec3(1.0, 0.0, 0.0);
+    vec3 T2 = cross(Vh, T1);
+    
+    float r = sqrt(xi.x);
+    float phi = 2.0 * PI * xi.y;
+    float t1 = r * cos(phi);
+    float t2 = r * sin(phi);
+    float s = 0.5 * (1.0 + Vh.z);
+    t2 = (1.0 - s)*sqrt(1.0 - t1*t1) + s*t2;
+    
+    vec3 Nh = t1*T1 + t2*T2 + sqrt(max(0.0, 1.0 - t1*t1 - t2*t2))*Vh;
+    vec3 Ne = normalize(vec3(a * Nh.x, a * Nh.y, max(0.0, Nh.z)));
+    
+    // Transform back to world space
+    vec3 H = normalize(tangent * Ne.x + bitangent * Ne.y + normal * Ne.z);
+    vec3 reflectedSample = reflect(-V, H);
+    
+    // L in local space
+    vec3 L_local = normalize(vec3(dot(reflectedSample, tangent), dot(reflectedSample, bitangent), dot(reflectedSample, normal)));
+
+    if (L_local.z <= 0.0) {
+        payload.throughput.xyz = vec3(0.0);
+    } else {
+        // Fresnel reflection
+        float cosThetaH = clamp(dot(H, V), 0.0, 1.0);
+        vec3 F = FresnelReflectance(cosThetaH, material.eta, material.extinction);
+
+        // Smith G2/G1 masking weight
+        // Lambda(w) = 0.5 * (-1 + sqrt(1 + a^2 * (1 - w.z^2) / w.z^2))
+        float a2 = a * a;
+        float LambdaV = 0.5 * (-1.0 + sqrt(1.0 + a2 * (1.0 - V_local.z * V_local.z) / (V_local.z * V_local.z)));
+        float LambdaL = 0.5 * (-1.0 + sqrt(1.0 + a2 * (1.0 - L_local.z * L_local.z) / (L_local.z * L_local.z)));
+        float G2_over_G1 = (1.0 + LambdaV) / (1.0 + LambdaV + LambdaL);
+
+        payload.throughput.xyz *= F * G2_over_G1;
+    }
+    
     payload.state.x = rng.state;
     traceRayEXT(topLevelAS,
     gl_RayFlagsOpaqueEXT,
@@ -72,8 +113,8 @@ void main()
     0,
     0,
     0,
-    hitPosition + normal * 0.001,
-    0.001,
+    OffsetRay(hitPosition, normal),
+    0.0,
     reflectedSample,
     1e30,
     0);
