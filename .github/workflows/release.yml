@@ -9,27 +9,25 @@ permissions:
   contents: write
 
 jobs:
-  build-windows:
+  build:
     runs-on: windows-latest
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Configure
-        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-
-      - name: Build
-        run: cmake --build build --config Release
-
-      - name: Install into package folder
-        run: cmake --install build --config Release --prefix package
+      - name: Build (your script)
+        shell: pwsh
+        run: powershell -ExecutionPolicy Bypass -File .\build.ps1 -Clean
 
       - name: Zip package
         shell: pwsh
-        run: Compress-Archive -Path package\* -DestinationPath Vulkanic-${{ github.ref_name }}-windows.zip
+        run: |
+          Compress-Archive -Path .\package\* -DestinationPath Vulkanic-${{ github.ref_name }}-windows.zip
 
-      - name: Create release and upload asset
+      - name: Create Release + Upload
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release create ${{ github.ref_name }} Vulkanic-${{ github.ref_name }}-windows.zip --generate-notes
+        run: |
+          gh release create ${{ github.ref_name }} `
+            Vulkanic-${{ github.ref_name }}-windows.zip `
+            --generate-notes
