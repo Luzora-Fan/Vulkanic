@@ -103,7 +103,17 @@ void main()
         float LambdaL = 0.5 * (-1.0 + sqrt(1.0 + a2 * (1.0 - L_local.z * L_local.z) / (L_local.z * L_local.z)));
         float G2_over_G1 = (1.0 + LambdaV) / (1.0 + LambdaV + LambdaL);
 
-        payload.throughput.xyz *= F * G2_over_G1;
+        // Single-scattering weight
+        vec3 single_scattering = F * G2_over_G1;
+
+        // Multiscatter GGX Energy Compensation (Fdez-Aguera approximation)
+        // E0 represents the directional albedo for a perfectly white material. 
+        // We approximate it directly using the masking weight G2_over_G1.
+        float E0 = G2_over_G1;
+        vec3 F_avg = F; // Simplified average Fresnel over the hemisphere
+        vec3 multi_scattering = F_avg * ((1.0 - E0) * (1.0 - E0)) / (1.0 - F_avg * (1.0 - E0));
+
+        payload.throughput.xyz *= (single_scattering + multi_scattering);
     }
     
     payload.state.x = rng.state;
