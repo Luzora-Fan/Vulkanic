@@ -22,8 +22,13 @@ jobs:
       - name: Set Vulkan env
         shell: pwsh
         run: |
-            $env:VULKAN_SDK = "C:\VulkanSDK\*\"
-            echo "VULKAN_SDK=$env:VULKAN_SDK"
+          # Find the actual directory inside C:\VulkanSDK
+          $vulkanPath = (Get-ChildItem -Path C:\VulkanSDK -Directory | Select-Object -First 1).FullName
+          
+          # Persist to GITHUB_ENV so subsequent steps (like CMake) can read it
+          echo "VULKAN_SDK=$vulkanPath" >> $env:GITHUB_ENV
+          
+          echo "Resolved Vulkan SDK Path: $vulkanPath"
 
       - name: Build
         shell: pwsh
