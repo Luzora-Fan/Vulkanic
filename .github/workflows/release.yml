@@ -1,0 +1,35 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --config Release
+
+      - name: Install into package folder
+        run: cmake --install build --config Release --prefix package
+
+      - name: Zip package
+        shell: pwsh
+        run: Compress-Archive -Path package\* -DestinationPath Vulkanic-${{ github.ref_name }}-windows.zip
+
+      - name: Create release and upload asset
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release create ${{ github.ref_name }} Vulkanic-${{ github.ref_name }}-windows.zip --generate-notes
