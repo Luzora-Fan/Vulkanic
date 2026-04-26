@@ -66,8 +66,13 @@ void main()
     vec2 xi = vec2(NextFloat(rng.state), NextFloat(rng.state));
     float a = material.roughness * material.roughness;
 
-    // Heitz 2018 VNDF sampling
-    vec3 Vh = normalize(vec3(a * V_local.x, a * V_local.y, V_local.z));
+    // Optional anisotropy support
+    float anisotropy = max(0.0, material.emission.x * 0.0); // Dummy placeholder for anisotropy, typically from material properties
+    float ax = max(0.001, a * (1.0 + anisotropy));
+    float ay = max(0.001, a * (1.0 - anisotropy));
+
+    // Heitz 2018 VNDF sampling (anisotropic)
+    vec3 Vh = normalize(vec3(ax * V_local.x, ay * V_local.y, V_local.z));
     float lensq = Vh.x * Vh.x + Vh.y * Vh.y;
     vec3 T1 = lensq > 0.0 ? vec3(-Vh.y, Vh.x, 0.0) * inversesqrt(lensq) : vec3(1.0, 0.0, 0.0);
     vec3 T2 = cross(Vh, T1);
@@ -80,7 +85,7 @@ void main()
     t2 = (1.0 - s)*sqrt(1.0 - t1*t1) + s*t2;
     
     vec3 Nh = t1*T1 + t2*T2 + sqrt(max(0.0, 1.0 - t1*t1 - t2*t2))*Vh;
-    vec3 Ne = normalize(vec3(a * Nh.x, a * Nh.y, max(0.0, Nh.z)));
+    vec3 Ne = normalize(vec3(ax * Nh.x, ay * Nh.y, max(0.0, Nh.z)));
     
     // Transform back to world space
     vec3 H = normalize(tangent * Ne.x + bitangent * Ne.y + normal * Ne.z);
@@ -97,10 +102,9 @@ void main()
         vec3 F = FresnelReflectance(cosThetaH, material.eta, material.extinction);
 
         // Smith G2/G1 masking weight
-        // Lambda(w) = 0.5 * (-1 + sqrt(1 + a^2 * (1 - w.z^2) / w.z^2))
-        float a2 = a * a;
-        float LambdaV = 0.5 * (-1.0 + sqrt(1.0 + a2 * (1.0 - V_local.z * V_local.z) / (V_local.z * V_local.z)));
-        float LambdaL = 0.5 * (-1.0 + sqrt(1.0 + a2 * (1.0 - L_local.z * L_local.z) / (L_local.z * L_local.z)));
+        // Anisotropic version
+        float LambdaV = 0.5 * (-1.0 + sqrt(1.0 + (ax*ax * V_local.x*V_local.x + ay*ay * V_local.y*V_local.y) / (V_local.z * V_local.z)));
+        float LambdaL = 0.5 * (-1.0 + sqrt(1.0 + (ax*ax * L_local.x*L_local.x + ay*ay * L_local.y*L_local.y) / (L_local.z * L_local.z)));
         float G2_over_G1 = (1.0 + LambdaV) / (1.0 + LambdaV + LambdaL);
 
         // Single-scattering weight
