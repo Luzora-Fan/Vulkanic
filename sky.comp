@@ -183,6 +183,17 @@ float sun_disk(vec3 V, vec3 L)
     return smoothstep(outer, inner, mu);
 }
 
+float sun_solid_angle(float angularRadius)
+{
+    return 2.0 * PI * (1.0 - cos(angularRadius));
+}
+
+vec3 direct_sun_radiance(vec3 L)
+{
+    vec3 origin = vec3(0.0, SkyEarthRadius() + 1.0, 0.0);
+    return SkySunRadiance() * transmittance(origin, L, 16);
+}
+
 vec3 sky_tint(vec3 V, vec3 L)
 {
     vec3 origin = vec3(0.0, SkyEarthRadius() + 1.0, 0.0);
@@ -245,9 +256,7 @@ vec3 sky_radiance(vec3 V, vec3 L, inout RNG rng)
     vec3 sky = mix(singleScatter, multiScatter, 0.35);
 
     float disk = sun_disk(V, L);
-    vec3 origin = vec3(0.0, SkyEarthRadius() + 1.0, 0.0);
-    vec3 T_sun = transmittance(origin, L, 16);
-    vec3 directSun = disk * SkySunRadiance() * T_sun;
+    vec3 directSun = disk * direct_sun_radiance(L);
 
     return sky + directSun;
 }
