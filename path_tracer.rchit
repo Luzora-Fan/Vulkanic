@@ -122,7 +122,7 @@ void main()
     
     payload.state.x = rng.state;
     traceRayEXT(topLevelAS,
-    gl_RayFlagsOpaqueEXT | gl_RayFlagsCullBackFacingTrianglesEXT,
+    gl_RayFlagsOpaqueEXT,
     0xFF,
     0,
     0,

@@ -41,7 +41,7 @@ void main()
         payload.state = uvec4(rngState, 0u, 0u, 0u);
 
         traceRayEXT(topLevelAS,
-        gl_RayFlagsOpaqueEXT | gl_RayFlagsCullBackFacingTrianglesEXT,
+        gl_RayFlagsOpaqueEXT,
         0xFF,
         0,
         0,
