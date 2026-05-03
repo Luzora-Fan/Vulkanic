@@ -41,9 +41,6 @@
   "models": {
     "box": {
       "file": "box.obj"
-    },
-    "icosphere": {
-      "file": "Sphere.obj"
     }
   },
   "materials": {
@@ -71,7 +68,7 @@
       "scale": [1.0, 2.0, 1.0]
     },
     {
-      "model": "icosphere",
+      "model": "box",
       "material": "gold",
       "position": [1.5, 0.0, 0.0],
       "rotationDegrees": [0.0, 0.0, 0.0],

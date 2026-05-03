@@ -93,34 +93,3 @@ if ($useSccache) {
 }
 
 Write-Host "`nBuild completed successfully."
-
-# 5. Package output
-$packageDir = Join-Path $repoRoot "package"
-
-if (Test-Path $packageDir) {
-    Remove-Item -Recurse -Force $packageDir
-}
-New-Item -ItemType Directory -Path $packageDir | Out-Null
-
-# Copy executable (adjust name if needed)
-$exePath = Join-Path $buildPath "Vulkanic.exe"
-if (!(Test-Path $exePath)) {
-    $exePath = Join-Path $buildPath "$Configuration\Vulkanic.exe"
-}
-
-if (!(Test-Path $exePath)) {
-    throw "Executable not found at $exePath"
-}
-
-Copy-Item $exePath $packageDir
-
-# Copy assets (if you have them)
-if (Test-Path (Join-Path $repoRoot "assets")) {
-    Copy-Item -Recurse (Join-Path $repoRoot "assets") $packageDir
-}
-
-if (Test-Path (Join-Path $repoRoot "shaders")) {
-    Copy-Item -Recurse (Join-Path $repoRoot "shaders") $packageDir
-}
-
-Write-Host "`nPackaging complete: $packageDir"
