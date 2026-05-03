@@ -80,11 +80,6 @@ struct RayPayload
     uvec4 state;
 };
 
-struct ShadowPayload
-{
-    uint visible;
-};
-
 uint Hash(uint x)
 {
     x ^= 2747636419u;
@@ -107,16 +102,12 @@ vec2 NextFloat2(inout uint state)
     return vec2(NextFloat(state), NextFloat(state));
 }
 
-vec3 GetSunDirection()
-{
-    return normalize(vec3(0.35, 0.85, 0.25));
-}
-
 vec3 SampleSky(vec3 direction, inout uint rngState)
 {
+    vec3 sunDir = normalize(vec3(0.35, 0.85, 0.25));
     RNG rng;
     rng.state = rngState;
-    vec3 sky = render_sky_pixel(direction, GetSunDirection(), rng);
+    vec3 sky = render_sky_pixel(direction, sunDir, rng);
     rngState = rng.state;
     return sky * pc.skyBottomExposure.w;
 }
