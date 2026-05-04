@@ -138,6 +138,7 @@ struct SkySpectralConfig
     float scaleHeightRayleigh = 7994.0f;
     float scaleHeightMie = 1200.0f;
     std::array<float, 3> sunRadiance{20.0f, 18.0f, 14.5f};
+    std::array<float, 3> sunDirection{0.35f, 0.3f, 0.25f};
     float sunRadius = 0.1f;
     float sunAa = 0.01f;
     uint32_t secondarySamples = 1;

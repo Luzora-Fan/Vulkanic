@@ -558,6 +558,7 @@ void ParseSections(const JsonValue::Object& root, RuntimeConfig& config)
             ParseOptionalJsonNumber(spectral, "SCALE_H_R", config.skySpectral.scaleHeightRayleigh);
             ParseOptionalJsonNumber(spectral, "SCALE_H_M", config.skySpectral.scaleHeightMie);
             ParseOptionalJsonFloat3(spectral, "SUN_RADIANCE", config.skySpectral.sunRadiance);
+            ParseOptionalJsonFloat3(spectral, "SUN_DIRECTION", config.skySpectral.sunDirection);
             ParseOptionalJsonNumber(spectral, "SUN_RADIUS", config.skySpectral.sunRadius);
             ParseOptionalJsonNumber(spectral, "SUN_AA", config.skySpectral.sunAa);
             ParseOptionalJsonUint32(spectral, "secondarySamples", config.skySpectral.secondarySamples);
@@ -784,6 +785,13 @@ RuntimeConfig ParseRuntimeConfig(const std::string& jsonText)
     if (config.skySpectral.sunRadius <= 0.0f || config.skySpectral.sunAa < 0.0f)
     {
         throw std::runtime_error("\"SUN_RADIUS\" must be greater than 0 and \"SUN_AA\" must be non-negative.");
+    }
+    {
+        const auto& d = config.skySpectral.sunDirection;
+        if (d[0] * d[0] + d[1] * d[1] + d[2] * d[2] <= 0.0f)
+        {
+            throw std::runtime_error("\"SUN_DIRECTION\" must be a non-zero vector.");
+        }
     }
     if (config.skySpectral.secondarySamples == 0 || config.skySpectral.viewSteps == 0 || config.skySpectral.samples == 0)
     {

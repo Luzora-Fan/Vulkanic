@@ -118,6 +118,7 @@ struct alignas(16) SceneData
     float skyMieEarthAtmosScaleHr[4];
     float skyScaleHmSunRadiusAa[4];
     float skySunRadiance[4];
+    float skySunDirection[4];
     uint32_t skySampleCounts[4];
 };
 
@@ -415,6 +416,9 @@ private:
         sceneData.skySunRadiance[0] = m_config.skySpectral.sunRadiance[0];
         sceneData.skySunRadiance[1] = m_config.skySpectral.sunRadiance[1];
         sceneData.skySunRadiance[2] = m_config.skySpectral.sunRadiance[2];
+        sceneData.skySunDirection[0] = m_config.skySpectral.sunDirection[0];
+        sceneData.skySunDirection[1] = m_config.skySpectral.sunDirection[1];
+        sceneData.skySunDirection[2] = m_config.skySpectral.sunDirection[2];
         sceneData.skySampleCounts[0] = m_config.skySpectral.secondarySamples;
         sceneData.skySampleCounts[1] = m_config.skySpectral.viewSteps;
         sceneData.skySampleCounts[2] = m_config.skySpectral.samples;

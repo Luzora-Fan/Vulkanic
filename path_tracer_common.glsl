@@ -9,6 +9,7 @@ layout(set = 0, binding = 2) uniform SceneData
     vec4 skyMieEarthAtmosScaleHr;
     vec4 skyScaleHmSunRadiusAa;
     vec4 skySunRadiance;
+    vec4 skySunDirection;
     uvec4 skySampleCounts;
 } sceneData;
 
@@ -109,7 +110,7 @@ vec2 NextFloat2(inout uint state)
 
 vec3 GetSunDirection()
 {
-    return normalize(vec3(0.35, 0.85, 0.25));
+    return normalize(sceneData.skySunDirection.xyz);
 }
 
 vec3 SampleSky(vec3 direction, inout uint rngState)

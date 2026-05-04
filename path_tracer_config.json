@@ -20,7 +20,7 @@
   },
   "sky": {
     "bottomColor": [0.03, 0.04, 0.06],
-    "exposure": 1.35,
+    "exposure": 0.5,
     "topColor": [0.55, 0.72, 0.95],
     "spectralConstants": {
       "BETA_R": [3.8e-6, 13.5e-6, 33.1e-6],
@@ -31,6 +31,7 @@
       "SCALE_H_R": 7994.0,
       "SCALE_H_M": 1200.0,
       "SUN_RADIANCE": [20.0, 18.0, 14.5],
+      "SUN_DIRECTION": [0.35, 0.3, 0.25],
       "SUN_RADIUS": 0.1,
       "SUN_AA": 0.01,
       "secondarySamples": 1,
