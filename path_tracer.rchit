@@ -5,7 +5,48 @@
 #include "path_tracer_common.glsl"
 
 layout(location = 0) rayPayloadInEXT RayPayload payload;
+layout(location = 1) rayPayloadEXT ShadowPayload shadowPayload;
 hitAttributeEXT vec2 hitAttributes;
+
+float SmithLambda(float ax, float ay, vec3 localDirection)
+{
+    float z2 = localDirection.z * localDirection.z;
+    if (z2 <= 1.0e-6)
+    {
+        return 1.0e8;
+    }
+    float slope = (ax * ax * localDirection.x * localDirection.x
+                 + ay * ay * localDirection.y * localDirection.y) / z2;
+    return 0.5 * (-1.0 + sqrt(1.0 + slope));
+}
+
+float GgxDistribution(float ax, float ay, vec3 H_local)
+{
+    if (H_local.z <= 0.0)
+    {
+        return 0.0;
+    }
+    float sx = H_local.x / ax;
+    float sy = H_local.y / ay;
+    float sz = H_local.z;
+    float denom = sx * sx + sy * sy + sz * sz;
+    return 1.0 / max(PI * ax * ay * denom * denom, 1.0e-6);
+}
+
+vec3 EvalGgxBrdf(vec3 V_local, vec3 L_local, float ax, float ay, vec3 eta, vec3 extinction)
+{
+    if (V_local.z <= 0.0 || L_local.z <= 0.0)
+    {
+        return vec3(0.0);
+    }
+    vec3 H_local = normalize(V_local + L_local);
+    float D = GgxDistribution(ax, ay, H_local);
+    float LambdaV = SmithLambda(ax, ay, V_local);
+    float LambdaL = SmithLambda(ax, ay, L_local);
+    float G = 1.0 / (1.0 + LambdaV + LambdaL);
+    vec3 F = FresnelReflectance(max(dot(H_local, V_local), 0.0), eta, extinction);
+    return F * (D * G / max(4.0 * V_local.z * L_local.z, 1.0e-6));
+}
 
 void main()
 {
@@ -42,6 +83,52 @@ void main()
     RNG rng;
     rng.state = payload.state.x;
 
+    vec3 V = -gl_WorldRayDirectionEXT;
+    vec3 helper = abs(normal.y) < 0.999 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+    vec3 tangent = normalize(cross(helper, normal));
+    vec3 bitangent = cross(normal, tangent);
+
+    vec3 V_local = normalize(vec3(dot(V, tangent), dot(V, bitangent), dot(V, normal)));
+
+    float a = material.roughness * material.roughness;
+    float anisotropy = max(0.0, material.emission.x * 0.0);
+    float ax = max(0.001, a * (1.0 + anisotropy));
+    float ay = max(0.001, a * (1.0 - anisotropy));
+
+    // ── Direct sun lighting (next-event estimation, sampled over the sun cone) ──
+    {
+        float coneAngle = max(SkySunRadius(), 1.0e-4);
+        vec3 sunDirection = sample_cone(GetSunDirection(), coneAngle, rng);
+        vec3 L_local = vec3(dot(sunDirection, tangent),
+                            dot(sunDirection, bitangent),
+                            dot(sunDirection, normal));
+        if (L_local.z > 0.0 && V_local.z > 0.0)
+        {
+            shadowPayload.visible = 0u;
+            traceRayEXT(topLevelAS,
+                        gl_RayFlagsOpaqueEXT
+                            | gl_RayFlagsTerminateOnFirstHitEXT
+                            | gl_RayFlagsSkipClosestHitShaderEXT,
+                        0xFF,
+                        0,
+                        0,
+                        1,
+                        OffsetRay(hitPosition, normal),
+                        0.001,
+                        sunDirection,
+                        1e30,
+                        1);
+
+            if (shadowPayload.visible != 0u)
+            {
+                vec3 brdf = EvalGgxBrdf(V_local, L_local, ax, ay, material.eta, material.extinction);
+                vec3 Li = SunIncidentRadiance();
+                float solidAngle = SunSolidAngle();
+                payload.radiance.xyz += payload.throughput.xyz * brdf * Li * (L_local.z * solidAngle);
+            }
+        }
+    }
+
     if (payload.state.y >= 3u)
     {
         float surviveProbability = clamp(MaxComponent(payload.throughput.xyz), 0.05, 0.95);
@@ -55,71 +142,54 @@ void main()
 
     payload.state.y += 1u;
 
-    vec3 V = -gl_WorldRayDirectionEXT;
-    vec3 helper = abs(normal.y) < 0.999 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
-    vec3 tangent = normalize(cross(helper, normal));
-    vec3 bitangent = cross(normal, tangent);
-    
-    // Transform V to local space
-    vec3 V_local = normalize(vec3(dot(V, tangent), dot(V, bitangent), dot(V, normal)));
-
     vec2 xi = vec2(NextFloat(rng.state), NextFloat(rng.state));
-    float a = material.roughness * material.roughness;
-
-    // Optional anisotropy support
-    float anisotropy = max(0.0, material.emission.x * 0.0); // Dummy placeholder for anisotropy, typically from material properties
-    float ax = max(0.001, a * (1.0 + anisotropy));
-    float ay = max(0.001, a * (1.0 - anisotropy));
 
     // Heitz 2018 VNDF sampling (anisotropic)
     vec3 Vh = normalize(vec3(ax * V_local.x, ay * V_local.y, V_local.z));
     float lensq = Vh.x * Vh.x + Vh.y * Vh.y;
     vec3 T1 = lensq > 0.0 ? vec3(-Vh.y, Vh.x, 0.0) * inversesqrt(lensq) : vec3(1.0, 0.0, 0.0);
     vec3 T2 = cross(Vh, T1);
-    
+
     float r = sqrt(xi.x);
     float phi = 2.0 * PI * xi.y;
     float t1 = r * cos(phi);
     float t2 = r * sin(phi);
     float s = 0.5 * (1.0 + Vh.z);
-    t2 = (1.0 - s)*sqrt(1.0 - t1*t1) + s*t2;
-    
-    vec3 Nh = t1*T1 + t2*T2 + sqrt(max(0.0, 1.0 - t1*t1 - t2*t2))*Vh;
+    t2 = (1.0 - s) * sqrt(1.0 - t1 * t1) + s * t2;
+
+    vec3 Nh = t1 * T1 + t2 * T2 + sqrt(max(0.0, 1.0 - t1 * t1 - t2 * t2)) * Vh;
     vec3 Ne = normalize(vec3(ax * Nh.x, ay * Nh.y, max(0.0, Nh.z)));
-    
-    // Transform back to world space
+
     vec3 H = normalize(tangent * Ne.x + bitangent * Ne.y + normal * Ne.z);
     vec3 reflectedSample = reflect(-V, H);
-    
-    // L in local space
-    vec3 L_local = normalize(vec3(dot(reflectedSample, tangent), dot(reflectedSample, bitangent), dot(reflectedSample, normal)));
 
-    if (L_local.z <= 0.0) {
+    vec3 L_local = normalize(vec3(dot(reflectedSample, tangent),
+                                  dot(reflectedSample, bitangent),
+                                  dot(reflectedSample, normal)));
+
+    if (L_local.z <= 0.0)
+    {
         payload.throughput.xyz = vec3(0.0);
-    } else {
-        // Fresnel reflection
+    }
+    else
+    {
         float cosThetaH = clamp(dot(H, V), 0.0, 1.0);
         vec3 F = FresnelReflectance(cosThetaH, material.eta, material.extinction);
 
-        // Smith G2/G1 masking weight
-        // Anisotropic version
-        float LambdaV = 0.5 * (-1.0 + sqrt(1.0 + (ax*ax * V_local.x*V_local.x + ay*ay * V_local.y*V_local.y) / (V_local.z * V_local.z)));
-        float LambdaL = 0.5 * (-1.0 + sqrt(1.0 + (ax*ax * L_local.x*L_local.x + ay*ay * L_local.y*L_local.y) / (L_local.z * L_local.z)));
+        float LambdaV = SmithLambda(ax, ay, V_local);
+        float LambdaL = SmithLambda(ax, ay, L_local);
         float G2_over_G1 = (1.0 + LambdaV) / (1.0 + LambdaV + LambdaL);
 
-        // Single-scattering weight
         vec3 single_scattering = F * G2_over_G1;
 
         // Multiscatter GGX Energy Compensation (Fdez-Aguera approximation)
-        // E0 represents the directional albedo for a perfectly white material. 
-        // We approximate it directly using the masking weight G2_over_G1.
         float E0 = G2_over_G1;
-        vec3 F_avg = F; // Simplified average Fresnel over the hemisphere
+        vec3 F_avg = F;
         vec3 multi_scattering = F_avg * ((1.0 - E0) * (1.0 - E0)) / (1.0 - F_avg * (1.0 - E0));
 
         payload.throughput.xyz *= (single_scattering + multi_scattering);
     }
-    
+
     payload.state.x = rng.state;
     traceRayEXT(topLevelAS,
     gl_RayFlagsOpaqueEXT,

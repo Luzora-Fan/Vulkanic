@@ -32,6 +32,7 @@ find_program(GLSLC_EXECUTABLE NAMES glslc HINTS "$ENV{VULKAN_SDK}/Bin" REQUIRED)
 set(RT_SHADER_SOURCES
         path_tracer.rgen
         path_tracer.rmiss
+        shadow.rmiss
         path_tracer.rchit)
 
 set(SHADER_SHARED_DEPENDENCIES

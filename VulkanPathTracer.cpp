@@ -1861,12 +1861,14 @@ private:
 
         const auto raygenBytecode = LoadBinaryFile(L"path_tracer.rgen.spv");
         const auto missBytecode = LoadBinaryFile(L"path_tracer.rmiss.spv");
+        const auto shadowMissBytecode = LoadBinaryFile(L"shadow.rmiss.spv");
         const auto closestHitBytecode = LoadBinaryFile(L"path_tracer.rchit.spv");
         VkShaderModule raygenModule = CreateShaderModule(raygenBytecode);
         VkShaderModule missModule = CreateShaderModule(missBytecode);
+        VkShaderModule shadowMissModule = CreateShaderModule(shadowMissBytecode);
         VkShaderModule closestHitModule = CreateShaderModule(closestHitBytecode);
 
-        const std::array<VkPipelineShaderStageCreateInfo, 3> shaderStages = {{
+        const std::array<VkPipelineShaderStageCreateInfo, 4> shaderStages = {{
             {
                 VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
                 nullptr,
@@ -1889,6 +1891,15 @@ private:
                 VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
                 nullptr,
                 0,
+                VK_SHADER_STAGE_MISS_BIT_KHR,
+                shadowMissModule,
+                "main",
+                nullptr,
+            },
+            {
+                VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+                nullptr,
+                0,
                 VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR,
                 closestHitModule,
                 "main",
@@ -1896,7 +1907,7 @@ private:
             },
         }};
 
-        const std::array<VkRayTracingShaderGroupCreateInfoKHR, 3> shaderGroups = {{
+        const std::array<VkRayTracingShaderGroupCreateInfoKHR, 4> shaderGroups = {{
             {
                 VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR,
                 nullptr,
@@ -1920,9 +1931,19 @@ private:
             {
                 VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR,
                 nullptr,
+                VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_KHR,
+                2,
+                VK_SHADER_UNUSED_KHR,
+                VK_SHADER_UNUSED_KHR,
+                VK_SHADER_UNUSED_KHR,
+                nullptr,
+            },
+            {
+                VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR,
+                nullptr,
                 VK_RAY_TRACING_SHADER_GROUP_TYPE_TRIANGLES_HIT_GROUP_KHR,
                 VK_SHADER_UNUSED_KHR,
-                2,
+                3,
                 VK_SHADER_UNUSED_KHR,
                 VK_SHADER_UNUSED_KHR,
                 nullptr,
@@ -1962,13 +1983,14 @@ private:
                 "Failed to create ray tracing pipeline");
 
         vkDestroyShaderModule(m_device, closestHitModule, nullptr);
+        vkDestroyShaderModule(m_device, shadowMissModule, nullptr);
         vkDestroyShaderModule(m_device, missModule, nullptr);
         vkDestroyShaderModule(m_device, raygenModule, nullptr);
     }
 
     void CreateShaderBindingTables()
     {
-        constexpr uint32_t kShaderGroupCount = 3;
+        constexpr uint32_t kShaderGroupCount = 4;
 
         const uint32_t handleSize = m_rayTracingPipelineProperties.shaderGroupHandleSize;
         const VkDeviceSize handleSizeAligned =
@@ -2001,8 +2023,22 @@ private:
         };
 
         createRegion(0, m_raygenShaderBindingTable, m_raygenShaderBindingTableRegion);
-        createRegion(1, m_missShaderBindingTable, m_missShaderBindingTableRegion);
-        createRegion(2, m_hitShaderBindingTable, m_hitShaderBindingTableRegion);
+
+        // Miss SBT holds two records: [0] sky miss, [1] shadow miss.
+        std::vector<uint8_t> missRecords(static_cast<size_t>(recordSize) * 2u, 0);
+        for (uint32_t i = 0; i < 2u; ++i)
+        {
+            std::memcpy(missRecords.data() + static_cast<size_t>(recordSize) * i,
+                        shaderGroupHandles.data() + static_cast<size_t>(1u + i) * handleSize,
+                        handleSize);
+        }
+        m_missShaderBindingTable =
+            CreateShaderBindingTableBuffer(missRecords.data(), static_cast<VkDeviceSize>(missRecords.size()));
+        m_missShaderBindingTableRegion.deviceAddress = GetBufferDeviceAddress(m_missShaderBindingTable.buffer);
+        m_missShaderBindingTableRegion.stride = recordSize;
+        m_missShaderBindingTableRegion.size = static_cast<VkDeviceSize>(missRecords.size());
+
+        createRegion(3, m_hitShaderBindingTable, m_hitShaderBindingTableRegion);
         m_callableShaderBindingTableRegion = {};
     }
 

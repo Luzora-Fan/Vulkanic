@@ -80,6 +80,11 @@ struct RayPayload
     uvec4 state;
 };
 
+struct ShadowPayload
+{
+    uint visible;
+};
+
 uint Hash(uint x)
 {
     x ^= 2747636419u;
@@ -102,21 +107,43 @@ vec2 NextFloat2(inout uint state)
     return vec2(NextFloat(state), NextFloat(state));
 }
 
+vec3 GetSunDirection()
+{
+    return normalize(vec3(0.35, 0.85, 0.25));
+}
+
 vec3 SampleSky(vec3 direction, inout uint rngState)
 {
-    vec3 sunDir = normalize(vec3(0.35, 0.85, 0.25));
     RNG rng;
     rng.state = rngState;
-    vec3 sky = render_sky_pixel(direction, sunDir, rng);
+    vec3 sky = render_sky_pixel(direction, GetSunDirection(), rng);
     rngState = rng.state;
     return sky * pc.skyBottomExposure.w;
 }
 
+float SunSolidAngle()
+{
+    return 2.0 * PI * (1.0 - cos(SkySunRadius()));
+}
+
+vec3 SunIncidentRadiance()
+{
+    vec3 origin = vec3(0.0, SkyEarthRadius() + 1.0, 0.0);
+    vec3 T = transmittance(origin, GetSunDirection(), 16);
+    return SkySunRadiance() * T * pc.skyBottomExposure.w;
+}
+
+// ACES filmic tone mapping (Narkowicz 2015 fit), then sRGB gamma encode.
 vec3 ToneMap(vec3 colour)
 {
     colour = max(colour, vec3(0.0));
-    colour = colour / (vec3(1.0) + colour);
-    return pow(colour, vec3(1.0 / 2.2));
+    const float a = 2.51;
+    const float b = 0.03;
+    const float c = 2.43;
+    const float d = 0.59;
+    const float e = 0.14;
+    vec3 mapped = clamp((colour * (a * colour + b)) / (colour * (c * colour + d) + e), 0.0, 1.0);
+    return pow(mapped, vec3(1.0 / 2.2));
 }
 
 float MaxComponent(vec3 value)
